@@ -107,7 +107,7 @@ manager.set_capture_source_index(1);
 
 - Windows 8 or later (DXGI 1.2+ required)
 - Compatible graphics driver supporting Desktop Duplication
-- Rust 1.87+ (edition 2024)
+- Rust 1.88+ (edition 2024)
 
 ## Building
 

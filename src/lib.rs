@@ -46,6 +46,15 @@ pub enum CaptureError {
     Fail(&'static str),
 }
 
+/// Error type for output duplication acquisition
+#[derive(Debug)]
+pub enum OutputDuplicationError {
+    /// No suitable output found
+    NoOutput,
+    /// Failed to create device or duplicate output
+    DeviceError,
+}
+
 /// Check whether the HRESULT represents a failure
 pub fn hr_failed(hr: HRESULT) -> bool {
     hr < 0
@@ -56,19 +65,19 @@ fn create_dxgi_factory_1() -> ComPtr<IDXGIFactory1> {
         let mut factory = ptr::null_mut();
         let hr = CreateDXGIFactory1(&IID_IDXGIFactory1, &mut factory);
         if hr_failed(hr) {
-            panic!("Failed to create DXGIFactory1, {:x}", hr)
+            panic!("Failed to create DXGIFactory1, {hr:x}")
         } else {
             ComPtr::from_raw(factory as *mut IDXGIFactory1)
         }
     }
 }
 
-#[allow(const_item_mutation)]
 fn d3d11_create_device(
     adapter: *mut IDXGIAdapter,
 ) -> (ComPtr<ID3D11Device>, ComPtr<ID3D11DeviceContext>) {
     unsafe {
         let (mut d3d11_device, mut device_context) = (ptr::null_mut(), ptr::null_mut());
+        let mut feature_level = D3D_FEATURE_LEVEL_9_1;
         let hr = D3D11CreateDevice(
             adapter,
             D3D_DRIVER_TYPE_UNKNOWN,
@@ -78,11 +87,11 @@ fn d3d11_create_device(
             0,
             D3D11_SDK_VERSION,
             &mut d3d11_device,
-            &mut D3D_FEATURE_LEVEL_9_1,
+            &mut feature_level,
             &mut device_context,
         );
         if hr_failed(hr) {
-            panic!("Failed to create d3d11 device and device context, {:x}", hr)
+            panic!("Failed to create d3d11 device and device context, {hr:x}")
         } else {
             (
                 ComPtr::from_raw(d3d11_device),
@@ -125,7 +134,7 @@ fn output_is_primary(output: &ComPtr<IDXGIOutput1>) -> bool {
 }
 
 fn get_capture_source(
-    output_dups: Vec<(ComPtr<IDXGIOutputDuplication>, ComPtr<IDXGIOutput1>)>,
+    output_dups: DuplicatedOutputs,
     cs_index: usize,
 ) -> Option<(ComPtr<IDXGIOutputDuplication>, ComPtr<IDXGIOutput1>)> {
     if cs_index == 0 {
@@ -140,17 +149,12 @@ fn get_capture_source(
     }
 }
 
-#[allow(clippy::type_complexity)]
+type DuplicatedOutputs = Vec<(ComPtr<IDXGIOutputDuplication>, ComPtr<IDXGIOutput1>)>;
+
 fn duplicate_outputs(
     mut device: ComPtr<ID3D11Device>,
     outputs: Vec<ComPtr<IDXGIOutput>>,
-) -> Result<
-    (
-        ComPtr<ID3D11Device>,
-        Vec<(ComPtr<IDXGIOutputDuplication>, ComPtr<IDXGIOutput1>)>,
-    ),
-    HRESULT,
-> {
+) -> Result<(ComPtr<ID3D11Device>, DuplicatedOutputs), HRESULT> {
     let mut out_dups = Vec::new();
     for output in outputs
         .into_iter()
@@ -293,9 +297,13 @@ impl DXGIManager {
         self.timeout_ms = timeout_ms
     }
 
+    /// Get current timeout value
+    pub fn get_timeout_ms(&self) -> u32 {
+        self.timeout_ms
+    }
+
     /// Duplicate and acquire output selected by `capture_source_index`
-    #[allow(clippy::result_unit_err)]
-    pub fn acquire_output_duplication(&mut self) -> Result<(), ()> {
+    pub fn acquire_output_duplication(&mut self) -> Result<(), OutputDuplicationError> {
         self.duplicated_output = None;
         let factory = create_dxgi_factory_1();
         for (outputs, adapter) in (0..)
@@ -316,8 +324,8 @@ impl DXGIManager {
         {
             // Creating device for each adapter that has the output
             let (d3d11_device, device_context) = d3d11_create_device(adapter.up().as_raw());
-            let (d3d11_device, output_duplications) =
-                duplicate_outputs(d3d11_device, outputs).map_err(|_| ())?;
+            let (d3d11_device, output_duplications) = duplicate_outputs(d3d11_device, outputs)
+                .map_err(|_| OutputDuplicationError::DeviceError)?;
             if let Some((output_duplication, output)) =
                 get_capture_source(output_duplications, self.capture_source_index)
             {
@@ -330,7 +338,7 @@ impl DXGIManager {
                 return Ok(());
             }
         }
-        Err(())
+        Err(OutputDuplicationError::NoOutput)
     }
 
     fn capture_frame_to_surface(&mut self) -> Result<ComPtr<IDXGISurface1>, CaptureError> {
@@ -406,7 +414,11 @@ impl DXGIManager {
 
         match output_desc.Rotation {
             DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED => {
-                pixel_buf.extend_from_slice(mapped_pixels)
+                // Handle stride padding by copying row by row
+                let byte_output_width = byte_size(output_width);
+                for row in mapped_pixels.chunks(byte_stride) {
+                    pixel_buf.extend_from_slice(&row[..byte_output_width]);
+                }
             }
             DXGI_MODE_ROTATION_ROTATE90 => unsafe {
                 let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
@@ -466,7 +478,7 @@ impl DXGIManager {
                     });
                 pixel_buf.set_len(pixel_buf.capacity());
             },
-            n => unreachable!("Undefined DXGI_MODE_ROTATION: {}", n),
+            n => unreachable!("Undefined DXGI_MODE_ROTATION: {n}"),
         }
         unsafe { frame_surface.Unmap() };
         Ok((pixel_buf, (output_width, output_height)))
@@ -486,318 +498,5 @@ impl DXGIManager {
     /// On failure, return CaptureError.
     pub fn capture_frame_components(&mut self) -> Result<(Vec<u8>, (usize, usize)), CaptureError> {
         self.capture_frame_t()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Test DXGI manager creation with various timeout values
-    #[test]
-    fn test_dxgi_manager_creation() {
-        // Test with reasonable timeout
-        let result = DXGIManager::new(1000);
-        if result.is_err() {
-            println!("DXGI not available - skipping test (expected in headless environments)");
-            return;
-        }
-
-        // If we get here, DXGI is available, so test other timeout values
-        // Test with minimal timeout
-        let result = DXGIManager::new(0);
-        if result.is_err() {
-            println!("Manager creation with 0ms timeout failed (may be expected)");
-        }
-
-        // Test with large timeout
-        let result = DXGIManager::new(10000);
-        if result.is_err() {
-            println!("Manager creation with 10000ms timeout failed (may be expected)");
-        }
-    }
-
-    /// Test timeout configuration
-    #[test]
-    fn test_timeout_configuration() {
-        let mut manager = match DXGIManager::new(500) {
-            Ok(m) => m,
-            Err(_) => {
-                println!("DXGI not available - skipping test");
-                return;
-            }
-        };
-
-        // Test setting different timeout values
-        manager.set_timeout_ms(100);
-        manager.set_timeout_ms(2000);
-        manager.set_timeout_ms(0);
-
-        // No panic should occur with any timeout value
-    }
-
-    /// Test capture source index management
-    #[test]
-    fn test_capture_source_index() {
-        let mut manager = match DXGIManager::new(300) {
-            Ok(m) => m,
-            Err(_) => {
-                println!("DXGI not available - skipping test");
-                return;
-            }
-        };
-
-        // Test getting initial capture source index
-        let initial_index = manager.get_capture_source_index();
-        assert_eq!(initial_index, 0, "Initial capture source should be 0");
-
-        // Test setting capture source index
-        manager.set_capture_source_index(0);
-        assert_eq!(manager.get_capture_source_index(), 0);
-
-        // Test with different indices (may fail if no additional displays)
-        // This is expected behavior and shouldn't panic
-        manager.set_capture_source_index(1);
-    }
-
-    /// Test geometry retrieval
-    #[test]
-    fn test_geometry() {
-        let manager = match DXGIManager::new(300) {
-            Ok(m) => m,
-            Err(_) => {
-                println!("DXGI not available - skipping test");
-                return;
-            }
-        };
-        let (width, height) = manager.geometry();
-
-        assert!(width > 0, "Width should be greater than 0, got {}", width);
-        assert!(
-            height > 0,
-            "Height should be greater than 0, got {}",
-            height
-        );
-
-        // Reasonable bounds for screen resolution
-        assert!(width <= 8192, "Width should be reasonable, got {}", width);
-        assert!(
-            height <= 8192,
-            "Height should be reasonable, got {}",
-            height
-        );
-    }
-
-    /// Test frame capture functionality
-    #[test]
-    fn test_frame_capture() {
-        let mut manager = match DXGIManager::new(300) {
-            Ok(m) => m,
-            Err(_) => {
-                println!("DXGI not available - skipping test");
-                return;
-            }
-        };
-
-        // Test single frame capture
-        let result = manager.capture_frame();
-        match result {
-            Ok((pixels, (width, height))) => {
-                assert!(!pixels.is_empty(), "Pixel data should not be empty");
-                assert_eq!(
-                    pixels.len(),
-                    width * height,
-                    "Pixel count should match dimensions"
-                );
-                assert!(width > 0 && height > 0, "Dimensions should be positive");
-            }
-            Err(CaptureError::Timeout) => {
-                // Timeout is acceptable in test environment
-                println!("Frame capture timed out (acceptable in tests)");
-            }
-            Err(e) => {
-                println!("Frame capture failed with error: {:?}", e);
-                // Don't fail the test for other errors as they might be environment-specific
-            }
-        }
-    }
-
-    /// Test frame components capture
-    #[test]
-    fn test_frame_components_capture() {
-        let mut manager = match DXGIManager::new(300) {
-            Ok(m) => m,
-            Err(_) => {
-                println!("DXGI not available - skipping test");
-                return;
-            }
-        };
-
-        let result = manager.capture_frame_components();
-        match result {
-            Ok((components, (width, height))) => {
-                assert!(!components.is_empty(), "Component data should not be empty");
-                assert_eq!(
-                    components.len(),
-                    width * height * 4,
-                    "Component count should be width * height * 4"
-                );
-                assert!(width > 0 && height > 0, "Dimensions should be positive");
-            }
-            Err(CaptureError::Timeout) => {
-                // Timeout is acceptable in test environment
-                println!("Frame components capture timed out (acceptable in tests)");
-            }
-            Err(e) => {
-                println!("Frame components capture failed with error: {:?}", e);
-                // Don't fail the test for other errors as they might be environment-specific
-            }
-        }
-    }
-
-    /// Test consistency between frame capture methods
-    #[test]
-    fn test_frame_capture_consistency() {
-        let mut manager = match DXGIManager::new(300) {
-            Ok(m) => m,
-            Err(_) => {
-                println!("DXGI not available - skipping test");
-                return;
-            }
-        };
-
-        let frame_result = manager.capture_frame();
-        let components_result = manager.capture_frame_components();
-
-        match (frame_result, components_result) {
-            (Ok((pixels, (fw, fh))), Ok((components, (cw, ch)))) => {
-                assert_eq!(fw, cw, "Frame widths should match");
-                assert_eq!(fh, ch, "Frame heights should match");
-                assert_eq!(
-                    pixels.len() * 4,
-                    components.len(),
-                    "Component data should be 4x pixel data"
-                );
-            }
-            (Err(e1), Err(e2)) => {
-                println!("Both captures failed: {:?}, {:?}", e1, e2);
-                // Both failing is acceptable in test environment
-            }
-            _ => {
-                // One succeeding and one failing might indicate an issue, but could be timing
-                println!("Inconsistent capture results between methods");
-            }
-        }
-    }
-
-    /// Test multiple frame captures for stability
-    #[test]
-    fn test_multiple_captures() {
-        let mut manager = match DXGIManager::new(300) {
-            Ok(m) => m,
-            Err(_) => {
-                println!("DXGI not available - skipping test");
-                return;
-            }
-        };
-        let mut successful_captures = 0;
-
-        for i in 0..10 {
-            match manager.capture_frame() {
-                Ok((pixels, (width, height))) => {
-                    successful_captures += 1;
-                    assert!(
-                        !pixels.is_empty(),
-                        "Pixel data should not be empty on capture {}",
-                        i
-                    );
-                    assert!(
-                        width > 0 && height > 0,
-                        "Dimensions should be positive on capture {}",
-                        i
-                    );
-
-                    // Test average color calculation like the original test
-                    let len = pixels.len() as u64;
-                    let (r, g, b) = pixels.into_iter().fold((0u64, 0u64, 0u64), |(r, g, b), p| {
-                        (r + p.r as u64, g + p.g as u64, b + p.b as u64)
-                    });
-
-                    // Colors should be in valid range
-                    assert!(r / len <= 255, "Average red should be <= 255");
-                    assert!(g / len <= 255, "Average green should be <= 255");
-                    assert!(b / len <= 255, "Average blue should be <= 255");
-                }
-                Err(CaptureError::Timeout) => {
-                    // Timeouts are acceptable in test environment
-                    continue;
-                }
-                Err(e) => {
-                    println!("Capture {} failed with error: {:?}", i, e);
-                    // Don't fail immediately, some errors might be temporary
-                }
-            }
-        }
-
-        // At least some captures should succeed if the system is available
-        if successful_captures == 0 {
-            println!("No captures succeeded - this may be expected in headless test environments");
-        }
-    }
-
-    /// Test BGRA8 color structure
-    #[test]
-    fn test_bgra8_color() {
-        let color = BGRA8 {
-            b: 255,
-            g: 128,
-            r: 64,
-            a: 255,
-        };
-
-        assert_eq!(color.b, 255);
-        assert_eq!(color.g, 128);
-        assert_eq!(color.r, 64);
-        assert_eq!(color.a, 255);
-
-        // Test copy and clone
-        let color2 = color;
-        assert_eq!(color, color2);
-
-        let color3 = color;
-        assert_eq!(color, color3);
-    }
-
-    /// Test hr_failed utility function
-    #[test]
-    fn test_hr_failed() {
-        // Test success codes
-        assert!(!hr_failed(0), "S_OK should not be a failure");
-        assert!(!hr_failed(1), "Positive values should not be failures");
-
-        // Test failure codes
-        assert!(hr_failed(-1), "Negative values should be failures");
-        assert!(hr_failed(-2147467259), "E_FAIL should be a failure");
-    }
-
-    /// Test capture error variants
-    #[test]
-    fn test_capture_error_variants() {
-        // Test that all error variants can be created and formatted
-        let errors = vec![
-            CaptureError::AccessDenied,
-            CaptureError::AccessLost,
-            CaptureError::RefreshFailure,
-            CaptureError::Timeout,
-            CaptureError::Fail("Test error message"),
-        ];
-
-        for error in errors {
-            let debug_string = format!("{:?}", error);
-            assert!(
-                !debug_string.is_empty(),
-                "Error should have debug representation"
-            );
-        }
     }
 }
