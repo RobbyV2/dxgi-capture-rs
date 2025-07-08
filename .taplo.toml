@@ -1,0 +1,26 @@
+# Taplo configuration for TOML formatting
+# https://taplo.tamasfe.dev/configuration/
+
+[formatting]
+# Basic formatting options
+align_entries = false
+array_auto_collapse = true
+array_auto_expand = true
+array_trailing_comma = true
+column_width = 120
+compact_arrays = false
+compact_inline_tables = false
+indent_entries = false
+indent_tables = false
+reorder_arrays = false
+reorder_keys = true
+
+# String formatting
+allowed_blank_lines = 1
+trailing_newline = true
+
+# Include patterns - format all TOML files
+include = [ "**/*.toml" ]
+
+# Exclude patterns - avoid formatting dependencies' TOML files if any
+exclude = [  ]

@@ -1,0 +1,20 @@
+# Rustfmt configuration for consistent code formatting
+# https://rust-lang.github.io/rustfmt/
+# Using only stable features for CI compatibility
+
+# Basic formatting
+edition = "2024"
+hard_tabs = false
+max_width = 100
+tab_spaces = 4
+
+# Import formatting
+reorder_imports = true
+
+# Function formatting
+fn_params_layout = "Tall"
+
+# Misc formatting
+newline_style = "Auto"
+remove_nested_parens = true
+use_small_heuristics = "Default"

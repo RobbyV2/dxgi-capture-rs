@@ -1,0 +1,32 @@
+[package]
+authors = [ "RobbyV2 <robbyv2@robby.blue>" ]
+categories = [ "multimedia", "os::windows-apis" ]
+description = "High-performance screen capturing with DXGI Desktop Duplication API for Windows in Rust"
+documentation = "https://docs.rs/dxgi-capture-rs"
+edition = "2024"
+keywords = [ "Windows", "DXGI", "screen", "capture", "desktop-duplication" ]
+license = "MIT"
+name = "dxgi-capture-rs"
+readme = "README.md"
+repository = "https://github.com/RobbyV2/dxgi-capture-rs"
+rust-version = "1.87"
+version = "1.0.0"
+
+[dependencies]
+winapi = { version = "0.3.8", features = [
+  "d3d11",
+  "d3dcommon",
+  "dxgi",
+  "dxgi1_2",
+  "dxgitype",
+  "ntdef",
+  "unknwnbase",
+  "windef",
+  "winerror",
+  "winuser",
+] }
+wio = "0.2.2"
+
+[dev-dependencies]
+# TOML formatting and validation
+taplo = "0.9"
