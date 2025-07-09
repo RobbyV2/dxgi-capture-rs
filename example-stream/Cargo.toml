@@ -8,3 +8,4 @@ publish = false
 dxgi-capture-rs = { path = ".." }
 eframe = "0.29"
 egui = "0.29"
+mimalloc = { version = "0.1", default-features = false }

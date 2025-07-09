@@ -1,8 +1,7 @@
 //! High-performance screen capturing with DXGI Desktop Duplication API for Windows.
 //!
 //! This library provides a Rust interface to the Windows DXGI Desktop Duplication API,
-//! enabling efficient screen capture with minimal performance overhead. It's designed
-//! for applications that need real-time screen capture capabilities.
+//! enabling efficient screen capture with minimal performance overhead.
 //!
 //! # Features
 //!
@@ -24,49 +23,33 @@
 //! use dxgi_capture_rs::{DXGIManager, CaptureError};
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Create a new DXGI manager with 1000ms timeout
 //!     let mut manager = DXGIManager::new(1000)?;
 //!     
-//!     // Get screen dimensions
-//!     let (width, height) = manager.geometry();
-//!     println!("Screen: {}x{}", width, height);
-//!     
-//!     // Capture a frame
 //!     match manager.capture_frame() {
-//!         Ok((pixels, (frame_width, frame_height))) => {
-//!             println!("Captured {}x{} frame with {} pixels",
-//!                      frame_width, frame_height, pixels.len());
-//!             
-//!             // Process your pixel data here
-//!             // pixels is Vec<BGRA8> where each pixel has b, g, r, a components
+//!         Ok((pixels, (width, height))) => {
+//!             println!("Captured {}x{} frame", width, height);
+//!             // Process pixels (Vec<BGRA8>)
 //!         }
 //!         Err(CaptureError::Timeout) => {
-//!             println!("Capture timed out - no new frame available");
+//!             // No new frame - normal occurrence
 //!         }
-//!         Err(e) => {
-//!             eprintln!("Capture failed: {:?}", e);
-//!         }
+//!         Err(e) => eprintln!("Capture failed: {:?}", e),
 //!     }
-//!     
 //!     Ok(())
 //! }
 //! ```
 //!
 //! # Multi-Monitor Support
 //!
-//! The library supports capturing from multiple monitors:
-//!
 //! ```rust,no_run
 //! # use dxgi_capture_rs::DXGIManager;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut manager = DXGIManager::new(1000)?;
 //!
-//! // Capture from primary monitor (index 0)
-//! manager.set_capture_source_index(0);
+//! manager.set_capture_source_index(0); // Primary monitor
 //! let (pixels, dimensions) = manager.capture_frame()?;
 //!
-//! // Capture from secondary monitor (index 1, if available)
-//! manager.set_capture_source_index(1);
+//! manager.set_capture_source_index(1); // Secondary monitor
 //! let (pixels, dimensions) = manager.capture_frame()?;
 //! # Ok(())
 //! # }
@@ -74,29 +57,17 @@
 //!
 //! # Error Handling
 //!
-//! The library provides comprehensive error handling for various scenarios:
-//!
 //! ```rust,no_run
 //! # use dxgi_capture_rs::{DXGIManager, CaptureError};
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut manager = DXGIManager::new(1000)?;
 //!
 //! match manager.capture_frame() {
-//!     Ok((pixels, dimensions)) => {
-//!         // Process successful capture
-//!     }
-//!     Err(CaptureError::Timeout) => {
-//!         // No new frame available within timeout - normal occurrence
-//!     }
-//!     Err(CaptureError::AccessDenied) => {
-//!         // Protected content (e.g., fullscreen video with DRM)
-//!     }
-//!     Err(CaptureError::AccessLost) => {
-//!         // Display mode changed, need to reinitialize
-//!     }
-//!     Err(e) => {
-//!         eprintln!("Capture failed: {:?}", e);
-//!     }
+//!     Ok((pixels, dimensions)) => { /* Process successful capture */ }
+//!     Err(CaptureError::Timeout) => { /* No new frame - normal */ }
+//!     Err(CaptureError::AccessDenied) => { /* Protected content */ }
+//!     Err(CaptureError::AccessLost) => { /* Display mode changed */ }
+//!     Err(e) => eprintln!("Capture failed: {:?}", e),
 //! }
 //! # Ok(())
 //! # }
@@ -116,61 +87,38 @@
 
 #![cfg(windows)]
 
-extern crate winapi;
-extern crate wio;
-
 use std::fmt;
-use std::mem::zeroed;
-use std::{mem, ptr, slice};
-use winapi::shared::dxgi::{
-    CreateDXGIFactory1, DXGI_MAP_READ, DXGI_OUTPUT_DESC, DXGI_RESOURCE_PRIORITY_MAXIMUM,
-    IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGISurface1, IID_IDXGIFactory1,
+use std::{mem, slice};
+use windows::{
+    Win32::{
+        Foundation::{HMODULE, RECT},
+        Graphics::{
+            Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_9_1},
+            Direct3D11::{
+                D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+                D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device,
+                ID3D11DeviceContext, ID3D11Texture2D,
+            },
+            Dxgi::{
+                Common::{
+                    DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_ROTATE90,
+                    DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270,
+                    DXGI_MODE_ROTATION_UNSPECIFIED,
+                },
+                CreateDXGIFactory1, DXGI_ERROR_ACCESS_DENIED, DXGI_ERROR_ACCESS_LOST,
+                DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ, DXGI_MAPPED_RECT,
+                DXGI_OUTPUT_DESC, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput,
+                IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, IDXGISurface1,
+            },
+        },
+    },
+    core::{Interface, Result as WindowsResult},
 };
-use winapi::shared::dxgi1_2::{IDXGIOutput1, IDXGIOutputDuplication};
-use winapi::shared::dxgitype::*;
-// use winapi::shared::ntdef::*;
-use winapi::shared::windef::*;
-use winapi::shared::winerror::*;
-use winapi::um::d3d11::*;
-use winapi::um::d3dcommon::*;
-use winapi::um::unknwnbase::*;
-use winapi::um::winuser::*;
-use wio::com::ComPtr;
 
-/// A pixel color represented in BGRA8 format.
+/// A pixel color in BGRA8 format.
 ///
-/// This structure represents a single pixel with Blue, Green, Red, and Alpha channels,
-/// each stored as an 8-bit unsigned integer. This is the standard format used by
-/// the DXGI Desktop Duplication API.
-///
-/// # Channel Order
-///
-/// The channels are ordered as BGRA (Blue, Green, Red, Alpha) to match the
-/// Windows DXGI format. This differs from the more common RGBA ordering.
-///
-/// # Value Range
-///
-/// Each channel can hold values from 0 to 255:
-/// - 0 represents the minimum intensity (black for color channels, transparent for alpha)
-/// - 255 represents the maximum intensity (full color for color channels, opaque for alpha)
-///
-/// # Examples
-///
-/// ```rust
-/// use dxgi_capture_rs::BGRA8;
-///
-/// // Create a red pixel (fully opaque)
-/// let red_pixel = BGRA8 { b: 0, g: 0, r: 255, a: 255 };
-///
-/// // Create a semi-transparent blue pixel
-/// let blue_pixel = BGRA8 { b: 255, g: 0, r: 0, a: 128 };
-///
-/// // Create a white pixel
-/// let white_pixel = BGRA8 { b: 255, g: 255, r: 255, a: 255 };
-///
-/// // Create a transparent pixel (color doesn't matter when alpha is 0)
-/// let transparent_pixel = BGRA8 { b: 0, g: 0, r: 0, a: 0 };
-/// ```
+/// Each channel can hold values from 0 to 255. The channels are ordered as BGRA
+/// to match the Windows DXGI format.
 #[derive(Copy, Clone, Debug, PartialOrd, PartialEq, Eq, Ord)]
 pub struct BGRA8 {
     /// Blue channel (0-255)
@@ -184,59 +132,14 @@ pub struct BGRA8 {
 }
 
 /// Errors that can occur during screen capture operations.
-///
-/// This enum represents the various error conditions that can occur when
-/// attempting to capture screen content using the DXGI Desktop Duplication API.
-/// Each variant indicates a specific failure scenario and suggests appropriate
-/// recovery strategies.
-///
-/// # Examples
-///
-/// ```rust,no_run
-/// # use dxgi_capture_rs::{DXGIManager, CaptureError};
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut manager = DXGIManager::new(1000)?;
-///
-/// match manager.capture_frame() {
-///     Ok((pixels, dimensions)) => {
-///         // Process successful capture
-///         println!("Captured {}x{} frame", dimensions.0, dimensions.1);
-///     }
-///     Err(CaptureError::Timeout) => {
-///         // No new frame available - this is normal
-///         println!("No new frame available within timeout");
-///     }
-///     Err(CaptureError::AccessDenied) => {
-///         // Protected content is being displayed
-///         println!("Cannot capture protected content");
-///     }
-///     Err(CaptureError::AccessLost) => {
-///         // Display mode changed, need to reinitialize
-///         println!("Display mode changed, reinitializing...");
-///         // You would typically recreate the manager here
-///     }
-///     Err(CaptureError::RefreshFailure) => {
-///         // Failed to refresh after a previous error
-///         println!("Failed to refresh capture system");
-///     }
-///     Err(CaptureError::Fail(msg)) => {
-///         // General failure with specific message
-///         println!("Capture failed: {}", msg);
-///     }
-/// }
-/// # Ok(())
-/// # }
-/// ```
 #[derive(Debug)]
 pub enum CaptureError {
     /// Access to the output duplication was denied.
     ///
     /// This typically occurs when attempting to capture protected content,
-    /// such as fullscreen video with DRM protection. The capture operation
-    /// cannot proceed due to security restrictions.
+    /// such as fullscreen video with DRM protection.
     ///
-    /// **Recovery Strategy**: Check if protected content is being displayed
-    /// and inform the user that capture is not possible during protected playback.
+    /// **Recovery**: Check if protected content is being displayed.
     AccessDenied,
 
     /// Access to the duplicated output was lost.
@@ -247,37 +150,26 @@ pub enum CaptureError {
     /// - Connecting/disconnecting monitors
     /// - Graphics driver updates
     ///
-    /// **Recovery Strategy**: Recreate the [`DXGIManager`] instance to
-    /// re-establish the connection to the updated display configuration.
+    /// **Recovery**: Recreate the [`DXGIManager`] instance.
     AccessLost,
 
     /// Failed to refresh the output duplication after a previous error.
     ///
-    /// This indicates that the system attempted to recover from a previous
-    /// error but was unsuccessful in re-establishing the capture session.
-    ///
-    /// **Recovery Strategy**: Recreate the [`DXGIManager`] instance or
-    /// wait before attempting capture again.
+    /// **Recovery**: Recreate the [`DXGIManager`] instance or wait before retrying.
     RefreshFailure,
 
     /// The capture operation timed out.
     ///
     /// This is a normal occurrence indicating that no new frame was available
-    /// within the specified timeout period. This often happens when the screen
-    /// content hasn't changed since the last capture.
+    /// within the specified timeout period.
     ///
-    /// **Recovery Strategy**: This is not an error condition. Simply retry
-    /// the capture operation. Consider adjusting the timeout value if needed.
+    /// **Recovery**: This is not an error condition. Simply retry the capture.
     Timeout,
 
     /// A general or unexpected failure occurred.
     ///
-    /// This represents various system-level failures that don't fit into
-    /// the other specific error categories.
-    ///
-    /// **Recovery Strategy**: Log the error message and consider recreating
-    /// the [`DXGIManager`] instance if the problem persists.
-    Fail(&'static str),
+    /// **Recovery**: Log the error message and consider recreating the [`DXGIManager`].
+    Fail(windows::core::Error),
 }
 
 impl fmt::Display for CaptureError {
@@ -294,76 +186,50 @@ impl fmt::Display for CaptureError {
 
 impl std::error::Error for CaptureError {}
 
+impl From<windows::core::Error> for CaptureError {
+    fn from(err: windows::core::Error) -> Self {
+        CaptureError::Fail(err)
+    }
+}
+
 /// Errors that can occur during output duplication initialization.
-///
-/// This enum represents errors that can occur when setting up the DXGI
-/// Desktop Duplication system, typically during [`DXGIManager::new`] or
-/// [`DXGIManager::acquire_output_duplication`] operations.
-///
-/// # Examples
-///
-/// ```rust,no_run
-/// # use dxgi_capture_rs::{DXGIManager, OutputDuplicationError};
-/// match DXGIManager::new(1000) {
-///     Ok(manager) => {
-///         // Successfully created manager
-///         println!("DXGI manager created successfully");
-///     }
-///     Err(error) => {
-///         // Handle initialization errors
-///         match error {
-///             "No suitable output found" => {
-///                 println!("No displays available for capture");
-///             }
-///             "Failed to create device or duplicate output" => {
-///                 println!("Graphics system initialization failed");
-///             }
-///             _ => {
-///                 println!("Unexpected error: {}", error);
-///             }
-///         }
-///     }
-/// }
-/// ```
 #[derive(Debug)]
 pub enum OutputDuplicationError {
     /// No suitable output display was found.
     ///
-    /// This occurs when:
-    /// - No displays are connected to the system
-    /// - All displays are disconnected or disabled
-    /// - The graphics driver doesn't support Desktop Duplication
-    /// - Running in a headless environment (e.g., some CI systems)
+    /// This occurs when no displays are connected, all displays are disabled,
+    /// or the graphics driver doesn't support Desktop Duplication.
     ///
-    /// **Recovery Strategy**: Ensure that at least one display is connected
-    /// and enabled, and that the graphics driver supports Desktop Duplication.
+    /// **Recovery**: Ensure a display is connected and graphics drivers support Desktop Duplication.
     NoOutput,
 
     /// Failed to create the D3D11 device or duplicate the output.
     ///
-    /// This can occur due to:
-    /// - Graphics driver issues
-    /// - Insufficient system resources
-    /// - Hardware acceleration disabled
-    /// - Incompatible graphics hardware
+    /// This can occur due to graphics driver issues, insufficient system resources,
+    /// or incompatible graphics hardware.
     ///
-    /// **Recovery Strategy**: Check graphics driver installation and system
-    /// resources. Ensure hardware acceleration is enabled.
-    DeviceError,
+    /// **Recovery**: Check graphics driver installation and system resources.
+    DeviceError(windows::core::Error),
 }
 
 impl fmt::Display for OutputDuplicationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             OutputDuplicationError::NoOutput => write!(f, "No suitable output display was found"),
-            OutputDuplicationError::DeviceError => {
-                write!(f, "Failed to create D3D11 device or duplicate output")
+            OutputDuplicationError::DeviceError(err) => {
+                write!(f, "Failed to create D3D11 device: {err}")
             }
         }
     }
 }
 
 impl std::error::Error for OutputDuplicationError {}
+
+impl From<windows::core::Error> for OutputDuplicationError {
+    fn from(err: windows::core::Error) -> Self {
+        OutputDuplicationError::DeviceError(err)
+    }
+}
 
 /// Checks whether a Windows HRESULT represents a failure condition.
 ///
@@ -383,15 +249,16 @@ impl std::error::Error for OutputDuplicationError {}
 ///
 /// ```rust
 /// use dxgi_capture_rs::hr_failed;
-/// use winapi::shared::winerror::{S_OK, E_FAIL};
+/// use windows::core::HRESULT;
+/// use windows::Win32::Foundation::{S_OK, E_FAIL};
 ///
 /// // Success codes
 /// assert!(!hr_failed(S_OK));        // 0
-/// assert!(!hr_failed(1));           // Positive values are success
+/// assert!(!hr_failed(HRESULT(1)));  // Positive values are success
 ///
 /// // Failure codes
 /// assert!(hr_failed(E_FAIL));       // -2147467259
-/// assert!(hr_failed(-1));           // Any negative value
+/// assert!(hr_failed(HRESULT(-1)));  // Any negative value
 /// ```
 ///
 /// # Technical Details
@@ -402,194 +269,132 @@ impl std::error::Error for OutputDuplicationError {}
 /// - 1 = Failure
 ///
 /// This is a standard Windows API pattern used throughout the DXGI and D3D11 APIs.
-pub fn hr_failed(hr: HRESULT) -> bool {
-    hr < 0
+///
+/// # Safety
+///
+/// This function is unsafe because it involves a raw pointer dereference.
+pub fn hr_failed(hr: windows::core::HRESULT) -> bool {
+    hr.is_err()
 }
 
-fn create_dxgi_factory_1() -> ComPtr<IDXGIFactory1> {
-    unsafe {
-        let mut factory = ptr::null_mut();
-        let hr = CreateDXGIFactory1(&IID_IDXGIFactory1, &mut factory);
-        if hr_failed(hr) {
-            panic!("Failed to create DXGIFactory1, {hr:x}")
-        } else {
-            ComPtr::from_raw(factory as *mut IDXGIFactory1)
-        }
-    }
+fn create_dxgi_factory_1() -> WindowsResult<IDXGIFactory1> {
+    unsafe { CreateDXGIFactory1() }
 }
 
 fn d3d11_create_device(
-    adapter: *mut IDXGIAdapter,
-) -> (ComPtr<ID3D11Device>, ComPtr<ID3D11DeviceContext>) {
+    adapter: Option<&IDXGIAdapter>,
+) -> WindowsResult<(ID3D11Device, ID3D11DeviceContext)> {
+    let mut device: Option<ID3D11Device> = None;
+    let mut device_context: Option<ID3D11DeviceContext> = None;
+    let feature_levels = [D3D_FEATURE_LEVEL_9_1];
+
     unsafe {
-        let (mut d3d11_device, mut device_context) = (ptr::null_mut(), ptr::null_mut());
-        let mut feature_level = D3D_FEATURE_LEVEL_9_1;
-        let hr = D3D11CreateDevice(
+        D3D11CreateDevice(
             adapter,
             D3D_DRIVER_TYPE_UNKNOWN,
-            ptr::null_mut(),
-            0,
-            ptr::null_mut(),
-            0,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&feature_levels),
             D3D11_SDK_VERSION,
-            &mut d3d11_device,
-            &mut feature_level,
-            &mut device_context,
-        );
-        if hr_failed(hr) {
-            panic!("Failed to create d3d11 device and device context, {hr:x}")
-        } else {
-            (
-                ComPtr::from_raw(d3d11_device),
-                ComPtr::from_raw(device_context),
-            )
-        }
-    }
+            Some(&mut device),
+            None,
+            Some(&mut device_context),
+        )
+    }?;
+
+    Ok((device.unwrap(), device_context.unwrap()))
 }
 
-fn get_adapter_outputs(adapter: &IDXGIAdapter1) -> Vec<ComPtr<IDXGIOutput>> {
+fn get_adapter_outputs(adapter: &IDXGIAdapter1) -> WindowsResult<Vec<IDXGIOutput>> {
     let mut outputs = Vec::new();
     for i in 0.. {
-        unsafe {
-            let mut output = ptr::null_mut();
-            if hr_failed(adapter.EnumOutputs(i, &mut output)) {
-                break;
-            } else {
-                let mut out_desc = zeroed();
-                (*output).GetDesc(&mut out_desc);
-                if out_desc.AttachedToDesktop != 0 {
-                    outputs.push(ComPtr::from_raw(output))
-                } else {
-                    break;
+        match unsafe { adapter.EnumOutputs(i) } {
+            Ok(output) => {
+                let desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc()? };
+                if desc.AttachedToDesktop.as_bool() {
+                    outputs.push(output);
                 }
             }
+            Err(_) => break,
         }
     }
-    outputs
-}
-
-fn output_is_primary(output: &ComPtr<IDXGIOutput1>) -> bool {
-    unsafe {
-        let mut output_desc = zeroed();
-        output.GetDesc(&mut output_desc);
-        let mut monitor_info: MONITORINFO = zeroed();
-        monitor_info.cbSize = mem::size_of::<MONITORINFO>() as u32;
-        GetMonitorInfoW(output_desc.Monitor, &mut monitor_info);
-        (monitor_info.dwFlags & 1) != 0
-    }
+    Ok(outputs)
 }
 
 fn get_capture_source(
-    output_dups: DuplicatedOutputs,
+    output_dups: &DuplicatedOutputs,
     cs_index: usize,
-) -> Option<(ComPtr<IDXGIOutputDuplication>, ComPtr<IDXGIOutput1>)> {
-    if cs_index == 0 {
-        output_dups
-            .into_iter()
-            .find(|(_, out)| output_is_primary(out))
+) -> Option<(IDXGIOutputDuplication, IDXGIOutput1)> {
+    if cs_index < output_dups.len() {
+        Some(output_dups[cs_index].clone())
     } else {
-        output_dups
-            .into_iter()
-            .filter(|(_, out)| !output_is_primary(out))
-            .nth(cs_index - 1)
+        None
     }
 }
 
-type DuplicatedOutputs = Vec<(ComPtr<IDXGIOutputDuplication>, ComPtr<IDXGIOutput1>)>;
+type DuplicatedOutputs = Vec<(IDXGIOutputDuplication, IDXGIOutput1)>;
 
 fn duplicate_outputs(
-    mut device: ComPtr<ID3D11Device>,
-    outputs: Vec<ComPtr<IDXGIOutput>>,
-) -> Result<(ComPtr<ID3D11Device>, DuplicatedOutputs), HRESULT> {
-    let mut out_dups = Vec::new();
-    for output in outputs
-        .into_iter()
-        .map(|out| out.cast::<IDXGIOutput1>().unwrap())
-    {
-        let dxgi_device = device.up::<IUnknown>();
-        let output_duplication = unsafe {
-            let mut output_duplication = ptr::null_mut();
-            let hr = output.DuplicateOutput(dxgi_device.as_raw(), &mut output_duplication);
-            if hr_failed(hr) {
-                return Err(hr);
-            }
-            ComPtr::from_raw(output_duplication)
-        };
-        device = dxgi_device.cast().unwrap();
-        out_dups.push((output_duplication, output));
+    device: &ID3D11Device,
+    outputs: Vec<IDXGIOutput>,
+) -> WindowsResult<DuplicatedOutputs> {
+    let mut duplicated_outputs = Vec::new();
+
+    for output in outputs {
+        let output1: IDXGIOutput1 = output.cast()?;
+        let duplicated_output = unsafe { output1.DuplicateOutput(device)? };
+        duplicated_outputs.push((duplicated_output, output1));
     }
-    Ok((device, out_dups))
+
+    Ok(duplicated_outputs)
 }
 
 struct DuplicatedOutput {
-    device: ComPtr<ID3D11Device>,
-    device_context: ComPtr<ID3D11DeviceContext>,
-    output: ComPtr<IDXGIOutput1>,
-    output_duplication: ComPtr<IDXGIOutputDuplication>,
+    device: ID3D11Device,
+    device_context: ID3D11DeviceContext,
+    output: IDXGIOutput1,
+    output_duplication: IDXGIOutputDuplication,
 }
+
 impl DuplicatedOutput {
-    fn get_desc(&self) -> DXGI_OUTPUT_DESC {
-        unsafe {
-            let mut desc = zeroed();
-            self.output.GetDesc(&mut desc);
-            desc
-        }
+    fn get_desc(&self) -> WindowsResult<DXGI_OUTPUT_DESC> {
+        unsafe { self.output.GetDesc() }
     }
 
-    fn capture_frame_to_surface(
-        &mut self,
-        timeout_ms: u32,
-    ) -> Result<ComPtr<IDXGISurface1>, HRESULT> {
-        let frame_resource = unsafe {
-            let mut frame_resource = ptr::null_mut();
-            let mut frame_info = zeroed();
-            let hr = self.output_duplication.AcquireNextFrame(
-                timeout_ms,
-                &mut frame_info,
-                &mut frame_resource,
-            );
-            if hr_failed(hr) {
-                return Err(hr);
-            }
-            ComPtr::from_raw(frame_resource)
-        };
-        let frame_texture = frame_resource.cast::<ID3D11Texture2D>().unwrap();
-        let mut texture_desc = unsafe {
-            let mut texture_desc = zeroed();
-            frame_texture.GetDesc(&mut texture_desc);
-            texture_desc
-        };
-        // Configure the description to make the texture readable
-        texture_desc.Usage = D3D11_USAGE_STAGING;
-        texture_desc.BindFlags = 0;
-        texture_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        texture_desc.MiscFlags = 0;
-        let readable_texture = unsafe {
-            let mut readable_texture = ptr::null_mut();
-            let hr = self
-                .device
-                .CreateTexture2D(&texture_desc, ptr::null(), &mut readable_texture);
-            if hr_failed(hr) {
-                return Err(hr);
-            }
-            ComPtr::from_raw(readable_texture)
-        };
-        // Lower priorities causes stuff to be needlessly copied from gpu to ram,
-        // causing huge ram usage on some systems.
-        unsafe { readable_texture.SetEvictionPriority(DXGI_RESOURCE_PRIORITY_MAXIMUM) };
-        let readable_surface = readable_texture.up::<ID3D11Resource>();
+    fn capture_frame_to_surface(&mut self, timeout_ms: u32) -> WindowsResult<IDXGISurface1> {
+        let mut resource: Option<IDXGIResource> = None;
+        let mut frame_info = unsafe { mem::zeroed() };
+
         unsafe {
-            self.device_context.CopyResource(
-                readable_surface.as_raw(),
-                frame_texture.up::<ID3D11Resource>().as_raw(),
-            );
-            self.output_duplication.ReleaseFrame();
-        }
-        readable_surface.cast()
+            self.output_duplication
+                .AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource)?
+        };
+
+        let texture: ID3D11Texture2D = resource.unwrap().cast()?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut desc) };
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+        desc.MiscFlags = 0;
+
+        let mut staged_texture: Option<ID3D11Texture2D> = None;
+        unsafe {
+            self.device
+                .CreateTexture2D(&desc, None, Some(&mut staged_texture))?
+        };
+        let staged_texture = staged_texture.unwrap();
+
+        unsafe { self.device_context.CopyResource(&staged_texture, &texture) };
+
+        unsafe { self.output_duplication.ReleaseFrame()? };
+
+        let surface: IDXGISurface1 = staged_texture.cast()?;
+        Ok(surface)
     }
 }
 
-/// The main interface for DXGI Desktop Duplication screen capture.
+/// The main manager for handling DXGI desktop duplication.
 ///
 /// `DXGIManager` provides a high-level interface to the Windows DXGI Desktop
 /// Duplication API, enabling efficient screen capture operations. It manages
@@ -621,7 +426,7 @@ impl DuplicatedOutput {
 ///         eprintln!("Capture failed: {:?}", e);
 ///     }
 /// }
-/// # Ok::<(), &'static str>(())
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 ///
 /// ## Multi-Monitor Setup
@@ -638,7 +443,7 @@ impl DuplicatedOutput {
 /// // Capture from secondary monitor (if available)
 /// manager.set_capture_source_index(1);
 /// let secondary_frame = manager.capture_frame();
-/// # Ok::<(), &'static str>(())
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 ///
 /// ## Timeout Configuration
@@ -652,7 +457,7 @@ impl DuplicatedOutput {
 /// manager.set_timeout_ms(100);  // Fast polling
 /// manager.set_timeout_ms(2000); // Slower polling
 /// manager.set_timeout_ms(0);    // No timeout (immediate return)
-/// # Ok::<(), &'static str>(())
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 ///
 /// # Thread Safety
@@ -666,79 +471,36 @@ impl DuplicatedOutput {
 /// However, if you encounter [`CaptureError::AccessLost`], you should create
 /// a new manager instance to re-establish the connection to the display system.
 pub struct DXGIManager {
+    factory: IDXGIFactory1,
     duplicated_output: Option<DuplicatedOutput>,
     capture_source_index: usize,
     timeout_ms: u32,
 }
 
-struct SharedPtr<T>(*const T);
-
-unsafe impl<T> Send for SharedPtr<T> {}
-
-unsafe impl<T> Sync for SharedPtr<T> {}
-
 impl DXGIManager {
-    /// Creates a new DXGI manager for screen capture operations.
+    /// Creates a new `DXGIManager` instance.
     ///
-    /// This constructor initializes the DXGI Desktop Duplication system and
-    /// prepares it for screen capture operations. It automatically selects
-    /// the primary display as the initial capture source.
-    ///
-    /// # Arguments
-    ///
-    /// * `timeout_ms` - The timeout in milliseconds for capture operations.
-    ///   - `0` means no timeout (immediate return if no frame available)
-    ///   - Higher values wait longer for new frames
-    ///   - Typical values: 1000-5000ms for interactive apps, 100-500ms for real-time
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(DXGIManager)` on success, or `Err(&'static str)` if
-    /// initialization fails.
+    /// This initializes the DXGI factory and sets up the necessary resources
+    /// for screen capture. The `timeout_ms` parameter specifies the default
+    /// timeout for frame capture operations.
     ///
     /// # Errors
     ///
-    /// This function can fail if:
-    /// - No suitable display outputs are available
-    /// - DXGI Desktop Duplication is not supported
-    /// - Graphics driver issues prevent initialization
-    /// - Running in a headless environment
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use dxgi_capture_rs::DXGIManager;
-    ///
-    /// // Create manager with 1 second timeout
-    /// let manager = DXGIManager::new(1000)?;
-    ///
-    /// // Create manager with no timeout (immediate return)
-    /// let fast_manager = DXGIManager::new(0)?;
-    ///
-    /// // Create manager with longer timeout for slower systems
-    /// let slow_manager = DXGIManager::new(5000)?;
-    /// # Ok::<(), &'static str>(())
-    /// ```
-    ///
-    /// # Platform Requirements
-    ///
-    /// - Windows 8 or later (DXGI 1.2+ required)
-    /// - Active desktop session
-    /// - Compatible graphics driver
-    pub fn new(timeout_ms: u32) -> Result<DXGIManager, &'static str> {
-        let mut manager = DXGIManager {
+    /// Returns an error if the DXGI manager cannot be initialized, which
+    /// typically occurs if the required graphics components are not available.
+    pub fn new(timeout_ms: u32) -> Result<Self, OutputDuplicationError> {
+        let factory = create_dxgi_factory_1()?;
+        let mut manager = Self {
+            factory,
             duplicated_output: None,
             capture_source_index: 0,
             timeout_ms,
         };
-
-        match manager.acquire_output_duplication() {
-            Ok(_) => Ok(manager),
-            Err(_) => Err("Failed to acquire output duplication"),
-        }
+        manager.acquire_output_duplication()?;
+        Ok(manager)
     }
 
-    /// Gets the dimensions of the current capture source.
+    /// Returns the screen geometry (width, height) of the current capture source.
     ///
     /// Returns the width and height of the display being captured, in pixels.
     /// This corresponds to the resolution of the selected capture source.
@@ -761,7 +523,7 @@ impl DXGIManager {
     /// // Calculate total pixels
     /// let total_pixels = width * height;
     /// println!("Total pixels: {}", total_pixels);
-    /// # Ok::<(), &'static str>(())
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
     /// # Notes
@@ -770,7 +532,7 @@ impl DXGIManager {
     /// - If the display configuration changes, you may need to create a new manager
     /// - This method is fast and can be called frequently without performance concerns
     pub fn geometry(&self) -> (usize, usize) {
-        let output_desc = self.duplicated_output.as_ref().unwrap().get_desc();
+        let output_desc = self.duplicated_output.as_ref().unwrap().get_desc().unwrap();
         let RECT {
             left,
             top,
@@ -807,7 +569,7 @@ impl DXGIManager {
     /// // Switch to secondary display
     /// manager.set_capture_source_index(1);
     /// let secondary_frame = manager.capture_frame();
-    /// # Ok::<(), &'static str>(())
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
     /// # Notes
@@ -845,7 +607,7 @@ impl DXGIManager {
     /// // Switch to secondary display
     /// manager.set_capture_source_index(1);
     /// assert_eq!(manager.get_capture_source_index(), 1);
-    /// # Ok::<(), &'static str>(())
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn get_capture_source_index(&self) -> usize {
         self.capture_source_index
@@ -879,7 +641,7 @@ impl DXGIManager {
     ///
     /// // Set longer timeout for less frequent captures
     /// manager.set_timeout_ms(5000);
-    /// # Ok::<(), &'static str>(())
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
     /// # Performance Notes
@@ -915,7 +677,7 @@ impl DXGIManager {
     /// // Change timeout and verify
     /// manager.set_timeout_ms(500);
     /// assert_eq!(manager.get_timeout_ms(), 500);
-    /// # Ok::<(), &'static str>(())
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn get_timeout_ms(&self) -> u32 {
         self.timeout_ms
@@ -949,7 +711,7 @@ impl DXGIManager {
     ///     Ok(()) => println!("Successfully reinitialized"),
     ///     Err(e) => println!("Failed to reinitialize: {:?}", e),
     /// }
-    /// # Ok::<(), &'static str>(())
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
     /// # Notes
@@ -959,29 +721,28 @@ impl DXGIManager {
     /// - You typically don't need to call this manually unless recovering from errors
     pub fn acquire_output_duplication(&mut self) -> Result<(), OutputDuplicationError> {
         self.duplicated_output = None;
-        let factory = create_dxgi_factory_1();
-        for (outputs, adapter) in (0..)
-            .map(|i| {
-                let mut adapter = ptr::null_mut();
-                unsafe {
-                    if factory.EnumAdapters1(i, &mut adapter) != DXGI_ERROR_NOT_FOUND {
-                        Some(ComPtr::from_raw(adapter))
-                    } else {
-                        None
-                    }
-                }
-            })
-            .take_while(Option::is_some)
-            .map(Option::unwrap)
-            .map(|adapter| (get_adapter_outputs(&adapter), adapter))
-            .filter(|(outs, _)| !outs.is_empty())
-        {
-            // Creating device for each adapter that has the output
-            let (d3d11_device, device_context) = d3d11_create_device(adapter.up().as_raw());
-            let (d3d11_device, output_duplications) = duplicate_outputs(d3d11_device, outputs)
-                .map_err(|_| OutputDuplicationError::DeviceError)?;
+
+        for i in 0.. {
+            let adapter = match unsafe { self.factory.EnumAdapters1(i) } {
+                Ok(adapter) => adapter,
+                Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
+                Err(e) => return Err(e.into()),
+            };
+
+            let (d3d11_device, device_context) = match d3d11_create_device(Some(&adapter.cast()?)) {
+                Ok(device) => device,
+                Err(_) => continue,
+            };
+
+            let outputs = get_adapter_outputs(&adapter)?;
+            if outputs.is_empty() {
+                continue;
+            }
+
+            let output_duplications = duplicate_outputs(&d3d11_device, outputs)?;
+
             if let Some((output_duplication, output)) =
-                get_capture_source(output_duplications, self.capture_source_index)
+                get_capture_source(&output_duplications, self.capture_source_index)
             {
                 self.duplicated_output = Some(DuplicatedOutput {
                     device: d3d11_device,
@@ -995,36 +756,28 @@ impl DXGIManager {
         Err(OutputDuplicationError::NoOutput)
     }
 
-    fn capture_frame_to_surface(&mut self) -> Result<ComPtr<IDXGISurface1>, CaptureError> {
-        if self.duplicated_output.is_none() {
-            if self.acquire_output_duplication().is_ok() {
-                return Err(CaptureError::Fail("No valid duplicated output"));
-            } else {
-                return Err(CaptureError::RefreshFailure);
-            }
+    fn capture_frame_to_surface(&mut self) -> Result<IDXGISurface1, CaptureError> {
+        if self.duplicated_output.is_none() && self.acquire_output_duplication().is_err() {
+            return Err(CaptureError::RefreshFailure);
         }
-        let timeout_ms = self.timeout_ms;
-        match self
-            .duplicated_output
-            .as_mut()
-            .unwrap()
-            .capture_frame_to_surface(timeout_ms)
-        {
+
+        let duplicated_output = self.duplicated_output.as_mut().unwrap();
+
+        match duplicated_output.capture_frame_to_surface(self.timeout_ms) {
             Ok(surface) => Ok(surface),
-            Err(DXGI_ERROR_ACCESS_LOST) => {
-                if self.acquire_output_duplication().is_ok() {
+            Err(e) => {
+                let code = e.code();
+                if code == DXGI_ERROR_ACCESS_LOST {
+                    self.duplicated_output = None;
                     Err(CaptureError::AccessLost)
+                } else if code == DXGI_ERROR_WAIT_TIMEOUT {
+                    Err(CaptureError::Timeout)
+                } else if code == DXGI_ERROR_ACCESS_DENIED {
+                    self.duplicated_output = None;
+                    Err(CaptureError::AccessDenied)
                 } else {
-                    Err(CaptureError::RefreshFailure)
-                }
-            }
-            Err(E_ACCESSDENIED) => Err(CaptureError::AccessDenied),
-            Err(DXGI_ERROR_WAIT_TIMEOUT) => Err(CaptureError::Timeout),
-            Err(_) => {
-                if self.acquire_output_duplication().is_ok() {
-                    Err(CaptureError::Fail("Failure when acquiring frame"))
-                } else {
-                    Err(CaptureError::RefreshFailure)
+                    self.duplicated_output = None;
+                    Err(CaptureError::Fail(e))
                 }
             }
         }
@@ -1033,112 +786,73 @@ impl DXGIManager {
     fn capture_frame_t<T: Copy + Send + Sync + Sized>(
         &mut self,
     ) -> Result<(Vec<T>, (usize, usize)), CaptureError> {
-        let frame_surface = self.capture_frame_to_surface()?;
-        let mapped_surface = unsafe {
-            let mut mapped_surface = zeroed();
-            if hr_failed(frame_surface.Map(&mut mapped_surface, DXGI_MAP_READ)) {
-                frame_surface.Release();
-                return Err(CaptureError::Fail("Failed to map surface"));
-            }
-            mapped_surface
-        };
-        let byte_size = |x| x * mem::size_of::<BGRA8>() / mem::size_of::<T>();
-        let output_desc = self.duplicated_output.as_mut().unwrap().get_desc();
-        let stride = mapped_surface.Pitch as usize / mem::size_of::<BGRA8>();
-        let byte_stride = byte_size(stride);
-        let (output_width, output_height) = {
-            let RECT {
-                left,
-                top,
-                right,
-                bottom,
-            } = output_desc.DesktopCoordinates;
-            ((right - left) as usize, (bottom - top) as usize)
-        };
-        let mut pixel_buf = Vec::with_capacity(byte_size(output_width * output_height));
+        let surface = self.capture_frame_to_surface()?;
 
-        let scan_lines = match output_desc.Rotation {
-            DXGI_MODE_ROTATION_ROTATE90 | DXGI_MODE_ROTATION_ROTATE270 => output_width,
-            _ => output_height,
+        let mut rect = DXGI_MAPPED_RECT::default();
+        unsafe { surface.Map(&mut rect, DXGI_MAP_READ)? };
+
+        let desc = self.duplicated_output.as_ref().unwrap().get_desc()?;
+        let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left) as usize;
+        let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top) as usize;
+
+        let pitch = rect.Pitch as usize;
+        let source = rect.pBits;
+
+        let (rotated_width, rotated_height) = match desc.Rotation {
+            DXGI_MODE_ROTATION_ROTATE90 | DXGI_MODE_ROTATION_ROTATE270 => (height, width),
+            _ => (width, height),
         };
 
-        let mapped_pixels = unsafe {
-            slice::from_raw_parts(mapped_surface.pBits as *const T, byte_stride * scan_lines)
+        let mut data_vec: Vec<T> = Vec::with_capacity(
+            rotated_width * rotated_height * mem::size_of::<BGRA8>() / mem::size_of::<T>(),
+        );
+
+        let bytes_per_pixel = mem::size_of::<BGRA8>() / mem::size_of::<T>();
+        let source_slice = unsafe {
+            slice::from_raw_parts(source as *const T, pitch * height / mem::size_of::<T>())
         };
 
-        match output_desc.Rotation {
+        match desc.Rotation {
             DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED => {
-                // Handle stride padding by copying row by row
-                let byte_output_width = byte_size(output_width);
-                for row in mapped_pixels.chunks(byte_stride) {
-                    pixel_buf.extend_from_slice(&row[..byte_output_width]);
+                for i in 0..height {
+                    let start = i * pitch / mem::size_of::<T>();
+                    let end = start + width * bytes_per_pixel;
+                    data_vec.extend_from_slice(&source_slice[start..end]);
                 }
             }
-            DXGI_MODE_ROTATION_ROTATE90 => unsafe {
-                let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
-                mapped_pixels
-                    .chunks(byte_stride)
-                    .rev()
-                    .enumerate()
-                    .for_each(|(column, chunk)| {
-                        let mut src = chunk.as_ptr() as *const BGRA8;
-                        let mut dst = ptr.0 as *mut BGRA8;
-                        dst = dst.add(column);
-                        let stop = src.add(output_height);
-                        while src != stop {
-                            dst.write(*src);
-                            src = src.add(1);
-                            dst = dst.add(output_width);
-                        }
-                    });
-                pixel_buf.set_len(pixel_buf.capacity());
-            },
-            DXGI_MODE_ROTATION_ROTATE180 => unsafe {
-                let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
-                mapped_pixels
-                    .chunks(byte_stride)
-                    .rev()
-                    .enumerate()
-                    .for_each(|(scan_line, chunk)| {
-                        let mut src = chunk.as_ptr() as *const BGRA8;
-                        let mut dst = ptr.0 as *mut BGRA8;
-                        dst = dst.add(scan_line * output_width);
-                        let stop = src;
-                        src = src.add(output_width);
-                        while src != stop {
-                            src = src.sub(1);
-                            dst.write(*src);
-                            dst = dst.add(1);
-                        }
-                    });
-                pixel_buf.set_len(pixel_buf.capacity());
-            },
-            DXGI_MODE_ROTATION_ROTATE270 => unsafe {
-                let ptr = SharedPtr(pixel_buf.as_ptr() as *const BGRA8);
-                mapped_pixels
-                    .chunks(byte_stride)
-                    .enumerate()
-                    .for_each(|(column, chunk)| {
-                        let mut src = chunk.as_ptr() as *const BGRA8;
-                        let mut dst = ptr.0 as *mut BGRA8;
-                        dst = dst.add(column);
-                        let stop = src;
-                        src = src.add(output_height);
-                        while src != stop {
-                            src = src.sub(1);
-                            dst.write(*src);
-                            dst = dst.add(output_width);
-                        }
-                    });
-                pixel_buf.set_len(pixel_buf.capacity());
-            },
-            n => unreachable!("Undefined DXGI_MODE_ROTATION: {n}"),
+            DXGI_MODE_ROTATION_ROTATE90 => {
+                for i in 0..width {
+                    for j in (0..height).rev() {
+                        let index = j * pitch / mem::size_of::<T>() + i * bytes_per_pixel;
+                        data_vec.extend_from_slice(&source_slice[index..index + bytes_per_pixel]);
+                    }
+                }
+            }
+            DXGI_MODE_ROTATION_ROTATE180 => {
+                for i in (0..height).rev() {
+                    for j in (0..width).rev() {
+                        let index = i * pitch / mem::size_of::<T>() + j * bytes_per_pixel;
+                        data_vec.extend_from_slice(&source_slice[index..index + bytes_per_pixel]);
+                    }
+                }
+            }
+            DXGI_MODE_ROTATION_ROTATE270 => {
+                for i in (0..width).rev() {
+                    for j in 0..height {
+                        let index = j * pitch / mem::size_of::<T>() + i * bytes_per_pixel;
+                        data_vec.extend_from_slice(&source_slice[index..index + bytes_per_pixel]);
+                    }
+                }
+            }
+            _ => {}
         }
-        unsafe { frame_surface.Unmap() };
-        Ok((pixel_buf, (output_width, output_height)))
+
+        unsafe { surface.Unmap()? };
+
+        Ok((data_vec, (rotated_width, rotated_height)))
     }
 
-    /// Captures a frame from the current capture source as BGRA8 pixels.
+    /// Captures a single frame and returns it as a `Vec<BGRA8>`.
     ///
     /// This method captures the current screen content and returns it as a vector
     /// of [`BGRA8`] pixels along with the frame dimensions. The method waits for
@@ -1149,10 +863,7 @@ impl DXGIManager {
     /// On success, returns `Ok((pixels, (width, height)))` where:
     /// - `pixels` is a `Vec<BGRA8>` containing the pixel data
     /// - `width` and `height` are the frame dimensions in pixels
-    /// - The total number of pixels is `width * height`
     /// - Pixels are stored in row-major order (left-to-right, top-to-bottom)
-    ///
-    /// On failure, returns `Err(CaptureError)` - see [`CaptureError`] for details.
     ///
     /// # Examples
     ///
@@ -1164,50 +875,26 @@ impl DXGIManager {
     /// match manager.capture_frame() {
     ///     Ok((pixels, (width, height))) => {
     ///         println!("Captured {}x{} frame with {} pixels", width, height, pixels.len());
-    ///         
-    ///         // Process pixels
-    ///         for (i, pixel) in pixels.iter().enumerate() {
-    ///             // Each pixel has b, g, r, a components
-    ///             println!("Pixel {}: R={}, G={}, B={}, A={}",
-    ///                      i, pixel.r, pixel.g, pixel.b, pixel.a);
-    ///         }
-    ///         
-    ///         // Calculate average color
-    ///         let len = pixels.len() as u64;
-    ///         let avg_r = pixels.iter().map(|p| p.r as u64).sum::<u64>() / len;
-    ///         let avg_g = pixels.iter().map(|p| p.g as u64).sum::<u64>() / len;
-    ///         let avg_b = pixels.iter().map(|p| p.b as u64).sum::<u64>() / len;
-    ///         println!("Average color: R={}, G={}, B={}", avg_r, avg_g, avg_b);
+    ///         // Process pixels - each pixel has b, g, r, a components
     ///     }
     ///     Err(CaptureError::Timeout) => {
-    ///         println!("No new frame available within timeout");
+    ///         // No new frame available within timeout
     ///     }
-    ///     Err(e) => {
-    ///         eprintln!("Capture failed: {:?}", e);
-    ///     }
+    ///     Err(e) => eprintln!("Capture failed: {:?}", e),
     /// }
-    /// # Ok::<(), &'static str>(())
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
     /// # Performance Notes
     ///
-    /// - The method automatically handles screen rotation
+    /// - Automatically handles screen rotation
     /// - Memory usage is `width * height * 4` bytes
     /// - Consider using [`DXGIManager::capture_frame_components`] for raw byte access
-    /// - The timeout setting affects how long this method waits for new frames
-    ///
-    /// # Error Conditions
-    ///
-    /// - [`CaptureError::Timeout`] - No new frame within timeout (normal)
-    /// - [`CaptureError::AccessDenied`] - Protected content is being displayed
-    /// - [`CaptureError::AccessLost`] - Display configuration changed
-    /// - [`CaptureError::RefreshFailure`] - Failed to reinitialize after error
-    /// - [`CaptureError::Fail`] - Other system-level failures
     pub fn capture_frame(&mut self) -> Result<(Vec<BGRA8>, (usize, usize)), CaptureError> {
         self.capture_frame_t()
     }
 
-    /// Captures a frame from the current capture source as raw component bytes.
+    /// Captures a single frame and returns it as a `Vec<u8>`.
     ///
     /// This method captures the current screen content and returns it as a vector
     /// of raw bytes representing the pixel components. Each pixel is represented
@@ -1218,79 +905,99 @@ impl DXGIManager {
     /// On success, returns `Ok((components, (width, height)))` where:
     /// - `components` is a `Vec<u8>` containing the raw pixel component data
     /// - `width` and `height` are the frame dimensions in pixels
-    /// - The vector length is `width * height * 4` bytes
     /// - Components are stored as [B, G, R, A, B, G, R, A, ...] in row-major order
-    ///
-    /// On failure, returns `Err(CaptureError)` - see [`CaptureError`] for details.
     ///
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use dxgi_capture_rs::{DXGIManager, CaptureError};
+    /// use dxgi_capture_rs::DXGIManager;
     ///
     /// let mut manager = DXGIManager::new(1000)?;
     ///
     /// match manager.capture_frame_components() {
     ///     Ok((components, (width, height))) => {
     ///         println!("Captured {}x{} frame with {} bytes", width, height, components.len());
-    ///         
     ///         // Process raw components (4 bytes per pixel: B, G, R, A)
-    ///         for pixel_idx in 0..(width * height) {
-    ///             let base_idx = pixel_idx * 4;
-    ///             let b = components[base_idx];
-    ///             let g = components[base_idx + 1];
-    ///             let r = components[base_idx + 2];
-    ///             let a = components[base_idx + 3];
-    ///             
-    ///             // Process pixel components
-    ///             if pixel_idx < 5 {  // Show first 5 pixels
-    ///                 println!("Pixel {}: R={}, G={}, B={}, A={}", pixel_idx, r, g, b, a);
-    ///             }
-    ///         }
-    ///         
-    ///         // Convert to different formats
-    ///         let mut rgb_data = Vec::with_capacity(width * height * 3);
-    ///         for chunk in components.chunks(4) {
-    ///             rgb_data.push(chunk[2]); // R
-    ///             rgb_data.push(chunk[1]); // G
-    ///             rgb_data.push(chunk[0]); // B
-    ///         }
-    ///         println!("Converted to RGB format: {} bytes", rgb_data.len());
     ///     }
-    ///     Err(CaptureError::Timeout) => {
-    ///         println!("No new frame available within timeout");
-    ///     }
-    ///     Err(e) => {
-    ///         eprintln!("Capture failed: {:?}", e);
-    ///     }
+    ///     Err(e) => eprintln!("Capture failed: {:?}", e),
     /// }
-    /// # Ok::<(), &'static str>(())
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
     /// # Performance Notes
     ///
-    /// - This method provides the most direct access to pixel data
+    /// - Provides direct access to pixel data
     /// - Memory usage is `width * height * 4` bytes
     /// - Useful for interfacing with C libraries or custom pixel processing
-    /// - No additional struct overhead compared to [`DXGIManager::capture_frame`]
-    ///
-    /// # Component Layout
-    ///
-    /// Each pixel is represented by 4 consecutive bytes:
-    /// - Byte 0: Blue component (0-255)
-    /// - Byte 1: Green component (0-255)
-    /// - Byte 2: Red component (0-255)
-    /// - Byte 3: Alpha component (0-255)
-    ///
-    /// # Error Conditions
-    ///
-    /// This method has the same error conditions as [`DXGIManager::capture_frame`]:
-    /// - [`CaptureError::Timeout`] - No new frame within timeout (normal)
-    /// - [`CaptureError::AccessDenied`] - Protected content is being displayed
-    /// - [`CaptureError::AccessLost`] - Display configuration changed
-    /// - [`CaptureError::RefreshFailure`] - Failed to reinitialize after error
-    /// - [`CaptureError::Fail`] - Other system-level failures
     pub fn capture_frame_components(&mut self) -> Result<(Vec<u8>, (usize, usize)), CaptureError> {
         self.capture_frame_t()
+    }
+
+    /// Captures a single frame with minimal overhead for performance-critical applications.
+    ///
+    /// This method provides the fastest possible screen capture by minimizing memory
+    /// allocations and copying. Returns raw pixel data without rotation handling.
+    ///
+    /// # Returns
+    ///
+    /// On success, returns `Ok((pixels, (width, height)))` where:
+    /// - `pixels` is a `Vec<u8>` containing raw BGRA pixel data
+    /// - `width` and `height` are the frame dimensions in pixels
+    /// - Data is in the native orientation (no rotation correction)
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use dxgi_capture_rs::DXGIManager;
+    ///
+    /// let mut manager = DXGIManager::new(100)?;
+    ///
+    /// match manager.capture_frame_fast() {
+    ///     Ok((pixels, (width, height))) => {
+    ///         println!("Fast captured {}x{} frame", width, height);
+    ///         // Process raw BGRA data directly
+    ///     }
+    ///     Err(e) => eprintln!("Fast capture failed: {:?}", e),
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn capture_frame_fast(&mut self) -> Result<(Vec<u8>, (usize, usize)), CaptureError> {
+        let surface = self.capture_frame_to_surface()?;
+
+        let mut rect = DXGI_MAPPED_RECT::default();
+        unsafe { surface.Map(&mut rect, DXGI_MAP_READ)? };
+
+        let desc = self.duplicated_output.as_ref().unwrap().get_desc()?;
+        let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left) as usize;
+        let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top) as usize;
+
+        let pitch = rect.Pitch as usize;
+        let source = rect.pBits;
+
+        // Fast path: copy data without rotation handling for maximum performance
+        let bytes_per_row = width * 4; // 4 bytes per pixel (BGRA)
+        let mut data_vec = Vec::with_capacity(width * height * 4);
+
+        unsafe {
+            // Ultra-fast path: if pitch equals row width, copy everything at once
+            if pitch == bytes_per_row {
+                let total_bytes = width * height * 4;
+                let source_slice = slice::from_raw_parts(source as *const u8, total_bytes);
+                data_vec.extend_from_slice(source_slice);
+            } else {
+                // Standard path: copy row by row for different pitch
+                let source_slice = slice::from_raw_parts(source as *const u8, pitch * height);
+
+                for row in 0..height {
+                    let row_start = row * pitch;
+                    let row_end = row_start + bytes_per_row;
+                    data_vec.extend_from_slice(&source_slice[row_start..row_end]);
+                }
+            }
+        }
+
+        unsafe { surface.Unmap()? };
+
+        Ok((data_vec, (width, height)))
     }
 }

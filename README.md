@@ -18,15 +18,6 @@ This library provides a high-performance Rust interface to the Windows DXGI Desk
 - **Error Handling**: Comprehensive error types for robust applications
 - **Windows Only**: Optimized specifically for Windows platforms
 
-## Quick Start
-
-Add this to your `Cargo.toml`:
-
-```toml
-[dependencies]
-dxgi-capture-rs = "1.0"
-```
-
 ## Example
 
 ```rust
@@ -172,17 +163,3 @@ The workspace is configured so that:
 - Both crates are built and tested together in CI
 - Code formatting and linting applies to both crates
 - The example application is excluded from publishing but included in development workflows
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Changelog
-
-### Version 1.0.0
-
-- Initial release (from https://github.com/bryal/dxgcap-rs)
-- Updated to Rust edition 2024
-- Comprehensive test suite
-- Multi-monitor support
-- Robust error handling
