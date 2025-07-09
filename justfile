@@ -18,6 +18,7 @@ build:
 
 test:
     cargo test --workspace --all-targets --all-features
+    cargo test --doc
 
 finalize:
     just format
