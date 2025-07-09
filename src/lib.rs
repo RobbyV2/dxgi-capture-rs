@@ -86,6 +86,7 @@
 //! if you need concurrent capture operations.
 
 #![cfg(windows)]
+#![cfg_attr(docsrs, doc(cfg(windows)))]
 
 use std::fmt;
 use std::{mem, slice};
@@ -532,14 +533,20 @@ impl DXGIManager {
     /// - If the display configuration changes, you may need to create a new manager
     /// - This method is fast and can be called frequently without performance concerns
     pub fn geometry(&self) -> (usize, usize) {
-        let output_desc = self.duplicated_output.as_ref().unwrap().get_desc().unwrap();
-        let RECT {
-            left,
-            top,
-            right,
-            bottom,
-        } = output_desc.DesktopCoordinates;
-        ((right - left) as usize, (bottom - top) as usize)
+        if let Some(ref output) = self.duplicated_output {
+            let output_desc = output.get_desc().expect("Failed to get output description");
+            let RECT {
+                left,
+                top,
+                right,
+                bottom,
+            } = output_desc.DesktopCoordinates;
+            ((right - left) as usize, (bottom - top) as usize)
+        } else {
+            // This should not happen if the manager was properly initialized
+            // Return (0, 0) to prevent panic, but this indicates a serious issue
+            (0, 0)
+        }
     }
 
     /// Sets the capture source index to select which display to capture from.
@@ -579,8 +586,18 @@ impl DXGIManager {
     /// - This method automatically reinitializes the capture system for the new display
     /// - The geometry may change when switching between displays of different resolutions
     pub fn set_capture_source_index(&mut self, cs: usize) {
+        let previous_index = self.capture_source_index;
         self.capture_source_index = cs;
-        let _ = self.acquire_output_duplication();
+
+        // Try to acquire the new capture source
+        if self.acquire_output_duplication().is_err() {
+            // If it fails and we're switching to index 0 (primary), revert to previous index
+            // This helps recover from invalid secondary display switches
+            if cs == 0 && cs != previous_index {
+                self.capture_source_index = previous_index;
+                let _ = self.acquire_output_duplication();
+            }
+        }
     }
 
     /// Gets the current capture source index.
@@ -791,7 +808,11 @@ impl DXGIManager {
         let mut rect = DXGI_MAPPED_RECT::default();
         unsafe { surface.Map(&mut rect, DXGI_MAP_READ)? };
 
-        let desc = self.duplicated_output.as_ref().unwrap().get_desc()?;
+        let desc = self
+            .duplicated_output
+            .as_ref()
+            .ok_or(CaptureError::RefreshFailure)?
+            .get_desc()?;
         let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left) as usize;
         let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top) as usize;
 
@@ -967,7 +988,11 @@ impl DXGIManager {
         let mut rect = DXGI_MAPPED_RECT::default();
         unsafe { surface.Map(&mut rect, DXGI_MAP_READ)? };
 
-        let desc = self.duplicated_output.as_ref().unwrap().get_desc()?;
+        let desc = self
+            .duplicated_output
+            .as_ref()
+            .ok_or(CaptureError::RefreshFailure)?
+            .get_desc()?;
         let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left) as usize;
         let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top) as usize;
 

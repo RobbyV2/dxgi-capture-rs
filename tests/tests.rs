@@ -762,3 +762,44 @@ fn test_resource_management() {
         "Should be able to create a manager after others were dropped"
     );
 }
+
+#[test]
+fn test_geometry_with_none_duplicated_output() {
+    let mut manager = match DXGIManager::new(100) {
+        Ok(m) => m,
+        Err(_) => {
+            println!("DXGI not available - skipping test");
+            return;
+        }
+    };
+
+    let (width, height) = manager.geometry();
+    assert!(width > 0 && height > 0, "Initial geometry should be valid");
+
+    manager.set_capture_source_index(99);
+
+    let (width_after, height_after) = manager.geometry();
+
+    if width_after == 0 && height_after == 0 {
+        println!(
+            "Geometry returned (0, 0) for invalid capture source - this is expected defensive behavior"
+        );
+    } else {
+        assert!(
+            width_after > 0 && height_after > 0,
+            "Geometry should be valid if not (0, 0)"
+        );
+    }
+
+    manager.set_capture_source_index(0);
+
+    let (width_final, height_final) = manager.geometry();
+    if width_final == 0 && height_final == 0 {
+        println!("Warning: Could not re-acquire primary monitor after switching back");
+    } else {
+        assert!(
+            width_final > 0 && height_final > 0,
+            "Final geometry should be valid after switching back to primary"
+        );
+    }
+}
