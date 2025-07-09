@@ -119,9 +119,9 @@
 extern crate winapi;
 extern crate wio;
 
+use std::fmt;
 use std::mem::zeroed;
 use std::{mem, ptr, slice};
-use std::fmt;
 use winapi::shared::dxgi::{
     CreateDXGIFactory1, DXGI_MAP_READ, DXGI_OUTPUT_DESC, DXGI_RESOURCE_PRIORITY_MAXIMUM,
     IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGISurface1, IID_IDXGIFactory1,
@@ -287,7 +287,7 @@ impl fmt::Display for CaptureError {
             CaptureError::AccessLost => write!(f, "Access to duplicated output was lost"),
             CaptureError::RefreshFailure => write!(f, "Failed to refresh output duplication"),
             CaptureError::Timeout => write!(f, "Capture operation timed out"),
-            CaptureError::Fail(msg) => write!(f, "Capture failed: {}", msg),
+            CaptureError::Fail(msg) => write!(f, "Capture failed: {msg}"),
         }
     }
 }
@@ -356,7 +356,9 @@ impl fmt::Display for OutputDuplicationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             OutputDuplicationError::NoOutput => write!(f, "No suitable output display was found"),
-            OutputDuplicationError::DeviceError => write!(f, "Failed to create D3D11 device or duplicate output"),
+            OutputDuplicationError::DeviceError => {
+                write!(f, "Failed to create D3D11 device or duplicate output")
+            }
         }
     }
 }

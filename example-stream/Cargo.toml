@@ -1,0 +1,10 @@
+[package]
+name = "example-stream"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+dxgi-capture-rs = { path = ".." }
+eframe = "0.29"
+egui = "0.29"

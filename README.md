@@ -117,6 +117,36 @@ cd dxgi-capture-rs
 cargo build --release
 ```
 
+This will build both the main library and the example application. You can also build just the library:
+
+```bash
+cargo build --release --package dxgi-capture-rs
+```
+
+## Example Application
+
+The repository includes a complete example application that demonstrates real-time desktop streaming using `egui`. This example shows how to:
+
+- Capture desktop frames at high performance
+- Display the captured content in a resizable window
+- Handle errors gracefully 
+- Maintain aspect ratio when scaling
+
+To run the example:
+
+```bash
+cargo run --package example-stream
+```
+
+The example application captures your desktop and displays it in a window with the following features:
+
+- **Real-time streaming**: Captures desktop content as fast as possible
+- **Resizable display**: The captured image scales to fit the window while maintaining aspect ratio
+- **Error handling**: Shows informative error messages for capture failures
+- **Performance optimized**: Only updates the display when new frames are available
+
+Note: The example requires an active desktop session and may not work in headless environments.
+
 ## Testing
 
 ```bash
@@ -130,6 +160,18 @@ Note: Tests may not run properly in headless environments (CI) as they require a
 This project is licensed under the MIT License.
 
 See [LICENSE](./LICENSE) for details.
+
+## Project Structure
+
+This is a Cargo workspace containing:
+
+- **`dxgi-capture-rs`** - The main library crate (published to crates.io)
+- **`example-stream`** - Example application demonstrating real-time desktop streaming with egui (development only)
+
+The workspace is configured so that:
+- Both crates are built and tested together in CI
+- Code formatting and linting applies to both crates
+- The example application is excluded from publishing but included in development workflows
 
 ## Contributing
 
