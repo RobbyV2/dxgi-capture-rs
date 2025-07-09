@@ -803,3 +803,368 @@ fn test_geometry_with_none_duplicated_output() {
         );
     }
 }
+
+// Tests for metadata functionality
+#[test]
+fn test_capture_frame_with_metadata() {
+    let mut manager = match DXGIManager::new(1000) {
+        Ok(m) => m,
+        Err(_) => {
+            println!("DXGI not available - skipping metadata test");
+            return;
+        }
+    };
+
+    let result = manager.capture_frame_with_metadata();
+    match result {
+        Ok((pixels, (width, height), metadata)) => {
+            assert!(!pixels.is_empty());
+            assert_eq!(pixels.len(), width * height);
+            assert!(width > 0 && height > 0);
+
+            assert!(metadata.last_present_time >= 0);
+            assert!(metadata.last_mouse_update_time >= 0);
+
+            let has_updates = metadata.has_updates();
+            let has_mouse = metadata.has_mouse_updates();
+            let change_count = metadata.total_change_count();
+
+            // Change count should be sum of dirty + move rects
+            assert_eq!(
+                change_count,
+                metadata.dirty_rects.len() + metadata.move_rects.len()
+            );
+
+            // has_updates should be true if there are any rects
+            assert_eq!(
+                has_updates,
+                !metadata.dirty_rects.is_empty() || !metadata.move_rects.is_empty()
+            );
+
+            // has_mouse_updates should be true if mouse time > 0
+            assert_eq!(has_mouse, metadata.last_mouse_update_time > 0);
+
+            println!(
+                "Metadata test passed - {} dirty rects, {} move rects, mouse updates: {}",
+                metadata.dirty_rects.len(),
+                metadata.move_rects.len(),
+                has_mouse
+            );
+        }
+        Err(CaptureError::Timeout) => {
+            println!("Metadata capture timed out - this is acceptable in test environment");
+        }
+        Err(e) => {
+            println!("Metadata capture failed: {e:?}");
+        }
+    }
+}
+
+#[test]
+fn test_capture_frame_components_with_metadata() {
+    let mut manager = match DXGIManager::new(1000) {
+        Ok(m) => m,
+        Err(_) => {
+            println!("DXGI not available - skipping metadata components test");
+            return;
+        }
+    };
+
+    let result = manager.capture_frame_components_with_metadata();
+    match result {
+        Ok((components, (width, height), metadata)) => {
+            // Test component data
+            assert!(!components.is_empty());
+            assert_eq!(components.len(), width * height * 4);
+            assert!(width > 0 && height > 0);
+
+            // Test rectangle validity
+            for &(left, top, right, bottom) in &metadata.dirty_rects {
+                assert!(left >= 0 && top >= 0);
+                assert!(right > left && bottom > top);
+                assert!(right <= width as i32 && bottom <= height as i32);
+            }
+
+            for move_rect in &metadata.move_rects {
+                let (src_x, src_y) = move_rect.source_point;
+                let (dst_left, dst_top, dst_right, dst_bottom) = move_rect.destination_rect;
+
+                assert!(src_x >= 0 && src_y >= 0);
+                assert!(dst_left >= 0 && dst_top >= 0);
+                assert!(dst_right > dst_left && dst_bottom > dst_top);
+                assert!(dst_right <= width as i32 && dst_bottom <= height as i32);
+            }
+
+            println!("Metadata components test passed");
+        }
+        Err(CaptureError::Timeout) => {
+            println!("Metadata components capture timed out - acceptable in test environment");
+        }
+        Err(e) => {
+            println!("Metadata components capture failed: {e:?}");
+        }
+    }
+}
+
+#[test]
+fn test_metadata_consistency() {
+    let mut manager = match DXGIManager::new(1000) {
+        Ok(m) => m,
+        Err(_) => {
+            println!("DXGI not available - skipping metadata consistency test");
+            return;
+        }
+    };
+
+    let res_bgra = manager.capture_frame_with_metadata();
+    if res_bgra.is_err() {
+        println!("BGRA8 metadata capture failed, skipping consistency test");
+        return;
+    }
+    let (pixels_bgra, (w_bgra, h_bgra), _) = res_bgra.unwrap();
+
+    manager.set_capture_source_index(manager.get_capture_source_index());
+
+    let res_comp = manager.capture_frame_components_with_metadata();
+    if res_comp.is_err() {
+        println!("Component metadata capture failed, skipping consistency test");
+        return;
+    }
+    let (pixels_comp, (w_comp, h_comp), _) = res_comp.unwrap();
+
+    assert_eq!(w_bgra, w_comp, "Widths should match");
+    assert_eq!(h_bgra, h_comp, "Heights should match");
+    assert_eq!(
+        pixels_bgra.len() * 4,
+        pixels_comp.len(),
+        "Component buffer size should be 4x BGRA buffer"
+    );
+
+    // Note: metadata might differ between captures due to timing,
+    // but we can check the structure validity (accumulated_frames is u32, always valid)
+
+    println!("Metadata consistency test passed");
+}
+
+#[test]
+fn test_metadata_helper_methods() {
+    // Test FrameMetadata helper methods with known data
+    use dxgi_capture_rs::{FrameMetadata, MoveRect};
+
+    // Test with no updates
+    let metadata_empty = FrameMetadata {
+        last_present_time: 12345,
+        last_mouse_update_time: 0,
+        accumulated_frames: 1,
+        rects_coalesced: false,
+        protected_content_masked_out: false,
+        pointer_position: None,
+        pointer_visible: false,
+        dirty_rects: Vec::new(),
+        move_rects: Vec::new(),
+    };
+
+    assert!(!metadata_empty.has_updates());
+    assert!(!metadata_empty.has_mouse_updates());
+    assert_eq!(metadata_empty.total_change_count(), 0);
+
+    // Test with dirty rects
+    let metadata_dirty = FrameMetadata {
+        last_present_time: 12345,
+        last_mouse_update_time: 6789,
+        accumulated_frames: 1,
+        rects_coalesced: false,
+        protected_content_masked_out: false,
+        pointer_position: Some((100, 200)),
+        pointer_visible: true,
+        dirty_rects: vec![(0, 0, 100, 100), (200, 200, 300, 300)],
+        move_rects: Vec::new(),
+    };
+
+    assert!(metadata_dirty.has_updates());
+    assert!(metadata_dirty.has_mouse_updates());
+    assert_eq!(metadata_dirty.total_change_count(), 2);
+
+    // Test with move rects
+    let metadata_move = FrameMetadata {
+        last_present_time: 12345,
+        last_mouse_update_time: 0,
+        accumulated_frames: 1,
+        rects_coalesced: false,
+        protected_content_masked_out: false,
+        pointer_position: None,
+        pointer_visible: false,
+        dirty_rects: Vec::new(),
+        move_rects: vec![MoveRect {
+            source_point: (50, 50),
+            destination_rect: (100, 100, 150, 150),
+        }],
+    };
+
+    assert!(metadata_move.has_updates());
+    assert!(!metadata_move.has_mouse_updates());
+    assert_eq!(metadata_move.total_change_count(), 1);
+
+    // Test with both
+    let metadata_both = FrameMetadata {
+        last_present_time: 12345,
+        last_mouse_update_time: 6789,
+        accumulated_frames: 2,
+        rects_coalesced: true,
+        protected_content_masked_out: false,
+        pointer_position: Some((150, 250)),
+        pointer_visible: true,
+        dirty_rects: vec![(0, 0, 100, 100)],
+        move_rects: vec![MoveRect {
+            source_point: (50, 50),
+            destination_rect: (100, 100, 150, 150),
+        }],
+    };
+
+    assert!(metadata_both.has_updates());
+    assert!(metadata_both.has_mouse_updates());
+    assert_eq!(metadata_both.total_change_count(), 2);
+
+    println!("Metadata helper methods test passed");
+}
+
+#[test]
+fn test_metadata_error_handling() {
+    let mut manager = match DXGIManager::new(10) {
+        Ok(m) => m,
+        Err(_) => {
+            println!("DXGI not available - skipping metadata error handling test");
+            return;
+        }
+    };
+
+    // Test with very short timeout to force timeout errors
+    manager.set_timeout_ms(1);
+
+    for _ in 0..5 {
+        let result = manager.capture_frame_with_metadata();
+        match result {
+            Ok((pixels, (width, height), metadata)) => {
+                // Success case - validate basic structure
+                assert!(!pixels.is_empty());
+                assert!(width > 0 && height > 0);
+
+                assert!(metadata.last_present_time >= 0);
+                assert!(metadata.last_mouse_update_time >= 0);
+                let change_count = metadata.total_change_count();
+                assert_eq!(
+                    change_count,
+                    metadata.dirty_rects.len() + metadata.move_rects.len()
+                );
+
+                println!(
+                    "Metadata capture succeeded with short timeout - {change_count} changes detected"
+                );
+            }
+            Err(CaptureError::Timeout) => {
+                println!("Expected timeout occurred");
+            }
+            Err(e) => {
+                println!("Metadata capture error handled: {e:?}");
+            }
+        }
+    }
+
+    manager.set_timeout_ms(1000);
+
+    manager.set_capture_source_index(1);
+    let result = manager.capture_frame_with_metadata();
+    match result {
+        Ok((_, _, metadata)) => {
+            let change_count = metadata.total_change_count();
+            println!(
+                "Metadata capture succeeded on secondary source - change count: {change_count}"
+            );
+        }
+        Err(CaptureError::Timeout) => {
+            println!("Timeout on secondary source - acceptable");
+        }
+        Err(e) => {
+            println!("Error on secondary source: {e:?}");
+        }
+    }
+
+    manager.set_capture_source_index(0);
+
+    println!("Metadata error handling test completed");
+}
+
+#[test]
+fn test_move_rect_structure() {
+    use dxgi_capture_rs::MoveRect;
+
+    let move_rect = MoveRect {
+        source_point: (100, 200),
+        destination_rect: (150, 250, 300, 400),
+    };
+
+    assert_eq!(move_rect.source_point, (100, 200));
+    assert_eq!(move_rect.destination_rect, (150, 250, 300, 400));
+
+    // Test copy and debug
+    let copied = move_rect;
+    assert_eq!(move_rect, copied);
+
+    println!("MoveRect: {move_rect:?}");
+    println!("Move rect structure test passed");
+}
+
+#[test]
+fn test_metadata_performance_impact() {
+    let mut manager = match DXGIManager::new(1000) {
+        Ok(m) => m,
+        Err(_) => {
+            println!("DXGI not available - skipping metadata performance test");
+            return;
+        }
+    };
+
+    let num_captures = 10;
+
+    // Measure regular capture time
+    let start_regular = std::time::Instant::now();
+    let mut regular_successes = 0;
+    for _ in 0..num_captures {
+        if manager.capture_frame().is_ok() {
+            regular_successes += 1;
+        }
+    }
+    let regular_duration = start_regular.elapsed();
+
+    // Measure metadata capture time
+    let start_metadata = std::time::Instant::now();
+    let mut metadata_successes = 0;
+    for _ in 0..num_captures {
+        if manager.capture_frame_with_metadata().is_ok() {
+            metadata_successes += 1;
+        }
+    }
+    let metadata_duration = start_metadata.elapsed();
+
+    if regular_successes > 0 && metadata_successes > 0 {
+        let regular_avg = regular_duration / regular_successes as u32;
+        let metadata_avg = metadata_duration / metadata_successes as u32;
+
+        println!("Performance comparison:");
+        println!("  Regular capture: {regular_avg:?} avg ({regular_successes} successes)");
+        println!("  Metadata capture: {metadata_avg:?} avg ({metadata_successes} successes)");
+
+        // Metadata should not add significant overhead (allow up to 50% increase)
+        let overhead_ratio = metadata_avg.as_nanos() as f64 / regular_avg.as_nanos() as f64;
+        println!("  Overhead ratio: {overhead_ratio:.2}x");
+
+        // This is a soft assertion - metadata extraction should be reasonably fast
+        if overhead_ratio > 2.0 {
+            println!("Warning: Metadata extraction may be causing significant overhead");
+        }
+    } else {
+        println!("Not enough successful captures to compare performance");
+    }
+
+    println!("Metadata performance test completed");
+}

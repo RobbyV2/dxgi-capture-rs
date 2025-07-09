@@ -8,6 +8,7 @@
 //! - **High Performance**: Direct access to DXGI Desktop Duplication API
 //! - **Multiple Monitor Support**: Capture from any available display
 //! - **Flexible Output**: Get pixel data as [`BGRA8`] or raw component bytes
+//! - **Frame Metadata**: Access dirty rectangles, moved rectangles, and timing information
 //! - **Comprehensive Error Handling**: Robust error types for production use
 //! - **Windows Optimized**: Specifically designed for Windows platforms
 //!
@@ -55,6 +56,61 @@
 //! # }
 //! ```
 //!
+//! # Frame Metadata for Streaming Applications
+//!
+//! The library provides detailed frame metadata including dirty rectangles and moved rectangles,
+//! which is crucial for optimizing streaming and remote desktop applications.
+//!
+//! ```rust,no_run
+//! # use dxgi_capture_rs::DXGIManager;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut manager = DXGIManager::new(1000)?;
+//!
+//! match manager.capture_frame_with_metadata() {
+//!     Ok((pixels, (width, height), metadata)) => {
+//!         // Only process frame if there are actual changes
+//!         if metadata.has_updates() {
+//!             println!("Frame has {} dirty rects and {} move rects",
+//!                      metadata.dirty_rects.len(), metadata.move_rects.len());
+//!             
+//!             // Process moved rectangles first (as per Microsoft recommendation)
+//!             for move_rect in &metadata.move_rects {
+//!                 let (src_x, src_y) = move_rect.source_point;
+//!                 let (dst_left, dst_top, dst_right, dst_bottom) = move_rect.destination_rect;
+//!                 
+//!                 // Copy pixels from source to destination
+//!                 // This is much more efficient than re-encoding the entire area
+//!                 copy_rectangle(&pixels, src_x, src_y, dst_left, dst_top,
+//!                               dst_right - dst_left, dst_bottom - dst_top);
+//!             }
+//!             
+//!             // Then process dirty rectangles
+//!             for &(left, top, right, bottom) in &metadata.dirty_rects {
+//!                 let width = (right - left) as usize;
+//!                 let height = (bottom - top) as usize;
+//!                 
+//!                 // Only encode/transmit the changed region
+//!                 encode_region(&pixels, left as usize, top as usize, width, height);
+//!             }
+//!         }
+//!         
+//!         // Check for mouse cursor updates
+//!         if metadata.has_mouse_updates() {
+//!             if let Some((x, y)) = metadata.pointer_position {
+//!                 println!("Mouse cursor at ({}, {}), visible: {}", x, y, metadata.pointer_visible);
+//!             }
+//!         }
+//!     }
+//!     Err(e) => eprintln!("Capture failed: {:?}", e),
+//! }
+//!
+//! # fn copy_rectangle(pixels: &[dxgi_capture_rs::BGRA8], src_x: i32, src_y: i32,
+//! #                   dst_x: i32, dst_y: i32, width: i32, height: i32) {}
+//! # fn encode_region(pixels: &[dxgi_capture_rs::BGRA8], x: usize, y: usize, width: usize, height: usize) {}
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Error Handling
 //!
 //! ```rust,no_run
@@ -79,6 +135,8 @@
 //! - Consider using [`DXGIManager::capture_frame_components`] for raw byte data
 //! - Memory usage scales with screen resolution
 //! - The library automatically handles screen rotation
+//! - Use metadata to optimize streaming by only processing changed regions
+//! - Process move rectangles before dirty rectangles for correct visual output
 //!
 //! # Thread Safety
 //!
@@ -107,7 +165,8 @@ use windows::{
                     DXGI_MODE_ROTATION_UNSPECIFIED,
                 },
                 CreateDXGIFactory1, DXGI_ERROR_ACCESS_DENIED, DXGI_ERROR_ACCESS_LOST,
-                DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ, DXGI_MAPPED_RECT,
+                DXGI_ERROR_MORE_DATA, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ,
+                DXGI_MAPPED_RECT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT,
                 DXGI_OUTPUT_DESC, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput,
                 IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, IDXGISurface1,
             },
@@ -130,6 +189,63 @@ pub struct BGRA8 {
     pub r: u8,
     /// Alpha channel (0-255, where 0 is transparent and 255 is opaque)
     pub a: u8,
+}
+
+/// Represents a rectangle that has been moved from one location to another.
+///
+/// This structure describes a region that was moved from a source location to
+/// a destination location, which is useful for optimizing screen updates in
+/// streaming applications.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct MoveRect {
+    /// The source point where the content was moved from (top-left corner)
+    pub source_point: (i32, i32),
+    /// The destination rectangle where the content was moved to
+    pub destination_rect: (i32, i32, i32, i32), // (left, top, right, bottom)
+}
+
+/// Metadata about a captured frame.
+///
+/// This structure contains timing information, dirty regions, moved regions,
+/// and other metadata that can help optimize screen capture and streaming
+/// applications.
+#[derive(Clone, Debug)]
+pub struct FrameMetadata {
+    /// Timestamp of the last desktop image update (Windows performance counter)
+    pub last_present_time: i64,
+    /// Timestamp of the last mouse update (Windows performance counter)
+    pub last_mouse_update_time: i64,
+    /// Number of frames accumulated since the last processed frame
+    pub accumulated_frames: u32,
+    /// Whether dirty regions were coalesced and may contain unmodified pixels
+    pub rects_coalesced: bool,
+    /// Whether protected content was masked out in the captured frame
+    pub protected_content_masked_out: bool,
+    /// Mouse cursor position and visibility
+    pub pointer_position: Option<(i32, i32)>,
+    /// Whether the mouse cursor is visible
+    pub pointer_visible: bool,
+    /// List of dirty rectangles that have changed since the last frame
+    pub dirty_rects: Vec<(i32, i32, i32, i32)>, // (left, top, right, bottom)
+    /// List of move rectangles that have been moved since the last frame
+    pub move_rects: Vec<MoveRect>,
+}
+
+impl FrameMetadata {
+    /// Returns true if the frame contains any updates (dirty regions or moves)
+    pub fn has_updates(&self) -> bool {
+        !self.dirty_rects.is_empty() || !self.move_rects.is_empty()
+    }
+
+    /// Returns true if the mouse cursor has been updated
+    pub fn has_mouse_updates(&self) -> bool {
+        self.last_mouse_update_time > 0
+    }
+
+    /// Returns the total number of changed regions
+    pub fn total_change_count(&self) -> usize {
+        self.dirty_rects.len() + self.move_rects.len()
+    }
 }
 
 /// Errors that can occur during screen capture operations.
@@ -392,6 +508,145 @@ impl DuplicatedOutput {
 
         let surface: IDXGISurface1 = staged_texture.cast()?;
         Ok(surface)
+    }
+
+    fn capture_frame_to_surface_with_metadata(
+        &mut self,
+        timeout_ms: u32,
+    ) -> WindowsResult<(IDXGISurface1, FrameMetadata)> {
+        let mut resource: Option<IDXGIResource> = None;
+        let mut frame_info: DXGI_OUTDUPL_FRAME_INFO = unsafe { mem::zeroed() };
+
+        unsafe {
+            self.output_duplication
+                .AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource)?
+        };
+
+        // Extract metadata from frame_info
+        let metadata = self.extract_frame_metadata(&frame_info)?;
+
+        let texture: ID3D11Texture2D = resource.unwrap().cast()?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut desc) };
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+        desc.MiscFlags = 0;
+
+        let mut staged_texture: Option<ID3D11Texture2D> = None;
+        unsafe {
+            self.device
+                .CreateTexture2D(&desc, None, Some(&mut staged_texture))?
+        };
+        let staged_texture = staged_texture.unwrap();
+
+        unsafe { self.device_context.CopyResource(&staged_texture, &texture) };
+
+        unsafe { self.output_duplication.ReleaseFrame()? };
+
+        let surface: IDXGISurface1 = staged_texture.cast()?;
+        Ok((surface, metadata))
+    }
+
+    fn extract_frame_metadata(
+        &self,
+        frame_info: &DXGI_OUTDUPL_FRAME_INFO,
+    ) -> WindowsResult<FrameMetadata> {
+        let mut dirty_rects = Vec::new();
+        let mut move_rects = Vec::new();
+
+        // Get dirty rectangles if there are any
+        if frame_info.TotalMetadataBufferSize > 0 {
+            // Get dirty rectangles
+            let mut dirty_rects_buffer_size = 0u32;
+            let dirty_result = unsafe {
+                self.output_duplication.GetFrameDirtyRects(
+                    0,
+                    std::ptr::null_mut(),
+                    &mut dirty_rects_buffer_size,
+                )
+            };
+
+            // Handle the case where there are dirty rects
+            if dirty_result.is_ok() && dirty_rects_buffer_size > 0 {
+                let dirty_rect_count = dirty_rects_buffer_size / mem::size_of::<RECT>() as u32;
+                let mut dirty_rects_buffer: Vec<RECT> =
+                    vec![RECT::default(); dirty_rect_count as usize];
+                unsafe {
+                    let get_result = self.output_duplication.GetFrameDirtyRects(
+                        dirty_rects_buffer_size,
+                        dirty_rects_buffer.as_mut_ptr(),
+                        &mut dirty_rects_buffer_size,
+                    );
+                    if get_result.is_ok() {
+                        dirty_rects = dirty_rects_buffer
+                            .into_iter()
+                            .map(|rect| (rect.left, rect.top, rect.right, rect.bottom))
+                            .collect();
+                    }
+                }
+            }
+
+            // Get move rectangles
+            let mut move_rects_buffer_size = 0u32;
+            let move_result = unsafe {
+                self.output_duplication.GetFrameMoveRects(
+                    0,
+                    std::ptr::null_mut(),
+                    &mut move_rects_buffer_size,
+                )
+            };
+
+            // Handle the case where there are move rects
+            if move_result.is_ok() && move_rects_buffer_size > 0 {
+                let move_rect_count =
+                    move_rects_buffer_size / mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>() as u32;
+                let mut move_rects_buffer: Vec<DXGI_OUTDUPL_MOVE_RECT> =
+                    vec![unsafe { mem::zeroed() }; move_rect_count as usize];
+                unsafe {
+                    let get_result = self.output_duplication.GetFrameMoveRects(
+                        move_rects_buffer_size,
+                        move_rects_buffer.as_mut_ptr(),
+                        &mut move_rects_buffer_size,
+                    );
+                    if get_result.is_ok() {
+                        move_rects = move_rects_buffer
+                            .into_iter()
+                            .map(|move_rect| MoveRect {
+                                source_point: (move_rect.SourcePoint.x, move_rect.SourcePoint.y),
+                                destination_rect: (
+                                    move_rect.DestinationRect.left,
+                                    move_rect.DestinationRect.top,
+                                    move_rect.DestinationRect.right,
+                                    move_rect.DestinationRect.bottom,
+                                ),
+                            })
+                            .collect();
+                    }
+                }
+            }
+        }
+
+        let pointer_position = if frame_info.PointerPosition.Visible.as_bool() {
+            Some((
+                frame_info.PointerPosition.Position.x,
+                frame_info.PointerPosition.Position.y,
+            ))
+        } else {
+            None
+        };
+
+        Ok(FrameMetadata {
+            last_present_time: frame_info.LastPresentTime,
+            last_mouse_update_time: frame_info.LastMouseUpdateTime,
+            accumulated_frames: frame_info.AccumulatedFrames,
+            rects_coalesced: frame_info.RectsCoalesced.as_bool(),
+            protected_content_masked_out: frame_info.ProtectedContentMaskedOut.as_bool(),
+            pointer_position,
+            pointer_visible: frame_info.PointerPosition.Visible.as_bool(),
+            dirty_rects,
+            move_rects,
+        })
     }
 }
 
@@ -800,6 +1055,39 @@ impl DXGIManager {
         }
     }
 
+    fn capture_frame_to_surface_with_metadata(
+        &mut self,
+    ) -> Result<(IDXGISurface1, FrameMetadata), CaptureError> {
+        if self.duplicated_output.is_none() && self.acquire_output_duplication().is_err() {
+            return Err(CaptureError::RefreshFailure);
+        }
+
+        let duplicated_output = self.duplicated_output.as_mut().unwrap();
+
+        match duplicated_output.capture_frame_to_surface_with_metadata(self.timeout_ms) {
+            Ok((surface, metadata)) => Ok((surface, metadata)),
+            Err(e) => {
+                let code = e.code();
+                if code == DXGI_ERROR_ACCESS_LOST {
+                    self.duplicated_output = None;
+                    Err(CaptureError::AccessLost)
+                } else if code == DXGI_ERROR_WAIT_TIMEOUT {
+                    Err(CaptureError::Timeout)
+                } else if code == DXGI_ERROR_ACCESS_DENIED {
+                    self.duplicated_output = None;
+                    Err(CaptureError::AccessDenied)
+                } else if code == DXGI_ERROR_MORE_DATA {
+                    // This should not happen with proper buffer sizing, but handle it gracefully
+                    self.duplicated_output = None;
+                    Err(CaptureError::Fail(e))
+                } else {
+                    self.duplicated_output = None;
+                    Err(CaptureError::Fail(e))
+                }
+            }
+        }
+    }
+
     fn capture_frame_t<T: Copy + Send + Sync + Sized>(
         &mut self,
     ) -> Result<(Vec<T>, (usize, usize)), CaptureError> {
@@ -1025,4 +1313,234 @@ impl DXGIManager {
 
         Ok((data_vec, (width, height)))
     }
+
+    /// Captures a single frame and returns it as `Vec<BGRA8>` along with frame metadata.
+    ///
+    /// This method captures the current screen content and returns it as a vector
+    /// of [`BGRA8`] pixels along with comprehensive metadata about the frame, including
+    /// dirty rectangles, moved rectangles, and timing information.
+    ///
+    /// # Returns
+    ///
+    /// On success, returns `Ok((pixels, (width, height), metadata))` where:
+    /// - `pixels` is a `Vec<BGRA8>` containing the pixel data
+    /// - `width` and `height` are the frame dimensions in pixels
+    /// - `metadata` is a [`FrameMetadata`] struct containing detailed frame information
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use dxgi_capture_rs::{DXGIManager, CaptureError};
+    ///
+    /// let mut manager = DXGIManager::new(1000)?;
+    ///
+    /// match manager.capture_frame_with_metadata() {
+    ///     Ok((pixels, (width, height), metadata)) => {
+    ///         println!("Captured {}x{} frame with {} dirty rects and {} move rects",
+    ///                  width, height, metadata.dirty_rects.len(), metadata.move_rects.len());
+    ///         
+    ///         // Process only dirty regions for efficient streaming
+    ///         for (left, top, right, bottom) in &metadata.dirty_rects {
+    ///             println!("Dirty region: ({}, {}) to ({}, {})", left, top, right, bottom);
+    ///         }
+    ///         
+    ///         // Handle moved content
+    ///         for move_rect in &metadata.move_rects {
+    ///             println!("Content moved from ({}, {}) to ({}, {}, {}, {})",
+    ///                      move_rect.source_point.0, move_rect.source_point.1,
+    ///                      move_rect.destination_rect.0, move_rect.destination_rect.1,
+    ///                      move_rect.destination_rect.2, move_rect.destination_rect.3);
+    ///         }
+    ///     }
+    ///     Err(CaptureError::Timeout) => {
+    ///         // No new frame available within timeout
+    ///     }
+    ///     Err(e) => eprintln!("Capture failed: {:?}", e),
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Performance Notes
+    ///
+    /// - Automatically handles screen rotation
+    /// - Memory usage is `width * height * 4` bytes plus metadata
+    /// - Use dirty and move rectangles to optimize streaming applications
+    /// - Move rectangles should be processed before dirty rectangles for correct visuals
+    pub fn capture_frame_with_metadata(&mut self) -> CaptureFrameWithMetadataResult {
+        let (surface, metadata) = self.capture_frame_to_surface_with_metadata()?;
+
+        let mut rect = DXGI_MAPPED_RECT::default();
+        unsafe { surface.Map(&mut rect, DXGI_MAP_READ)? };
+
+        let desc = self
+            .duplicated_output
+            .as_ref()
+            .ok_or(CaptureError::RefreshFailure)?
+            .get_desc()?;
+        let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left) as usize;
+        let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top) as usize;
+
+        let pitch = rect.Pitch as usize;
+        let source = rect.pBits;
+
+        let (rotated_width, rotated_height) = match desc.Rotation {
+            DXGI_MODE_ROTATION_ROTATE90 | DXGI_MODE_ROTATION_ROTATE270 => (height, width),
+            _ => (width, height),
+        };
+
+        let mut data_vec: Vec<BGRA8> = Vec::with_capacity(rotated_width * rotated_height);
+
+        let bytes_per_pixel = mem::size_of::<BGRA8>();
+        let source_slice = unsafe {
+            slice::from_raw_parts(source as *const BGRA8, pitch * height / bytes_per_pixel)
+        };
+
+        match desc.Rotation {
+            DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED => {
+                for i in 0..height {
+                    let start = i * pitch / bytes_per_pixel;
+                    let end = start + width;
+                    data_vec.extend_from_slice(&source_slice[start..end]);
+                }
+            }
+            DXGI_MODE_ROTATION_ROTATE90 => {
+                for i in 0..width {
+                    for j in (0..height).rev() {
+                        let index = j * pitch / bytes_per_pixel + i;
+                        data_vec.push(source_slice[index]);
+                    }
+                }
+            }
+            DXGI_MODE_ROTATION_ROTATE180 => {
+                for i in (0..height).rev() {
+                    for j in (0..width).rev() {
+                        let index = i * pitch / bytes_per_pixel + j;
+                        data_vec.push(source_slice[index]);
+                    }
+                }
+            }
+            DXGI_MODE_ROTATION_ROTATE270 => {
+                for i in (0..width).rev() {
+                    for j in 0..height {
+                        let index = j * pitch / bytes_per_pixel + i;
+                        data_vec.push(source_slice[index]);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        unsafe { surface.Unmap()? };
+
+        Ok((data_vec, (rotated_width, rotated_height), metadata))
+    }
+
+    /// Captures a single frame and returns it as `Vec<u8>` along with frame metadata.
+    ///
+    /// This method captures the current screen content and returns it as a vector
+    /// of raw bytes representing the pixel components along with comprehensive
+    /// metadata about the frame.
+    ///
+    /// # Returns
+    ///
+    /// On success, returns `Ok((components, (width, height), metadata))` where:
+    /// - `components` is a `Vec<u8>` containing the raw pixel component data
+    /// - `width` and `height` are the frame dimensions in pixels
+    /// - `metadata` is a [`FrameMetadata`] struct containing detailed frame information
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use dxgi_capture_rs::DXGIManager;
+    ///
+    /// let mut manager = DXGIManager::new(1000)?;
+    ///
+    /// match manager.capture_frame_components_with_metadata() {
+    ///     Ok((components, (width, height), metadata)) => {
+    ///         println!("Captured {}x{} frame with {} bytes", width, height, components.len());
+    ///         
+    ///         // Only process changed regions for efficiency
+    ///         if metadata.has_updates() {
+    ///             println!("Frame has {} total changes", metadata.total_change_count());
+    ///             // Process components (4 bytes per pixel: B, G, R, A)
+    ///         }
+    ///     }
+    ///     Err(e) => eprintln!("Capture failed: {:?}", e),
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn capture_frame_components_with_metadata(
+        &mut self,
+    ) -> CaptureFrameComponentsWithMetadataResult {
+        let (surface, metadata) = self.capture_frame_to_surface_with_metadata()?;
+
+        let mut rect = DXGI_MAPPED_RECT::default();
+        unsafe { surface.Map(&mut rect, DXGI_MAP_READ)? };
+
+        let desc = self
+            .duplicated_output
+            .as_ref()
+            .ok_or(CaptureError::RefreshFailure)?
+            .get_desc()?;
+        let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left) as usize;
+        let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top) as usize;
+
+        let pitch = rect.Pitch as usize;
+        let source = rect.pBits;
+
+        let (rotated_width, rotated_height) = match desc.Rotation {
+            DXGI_MODE_ROTATION_ROTATE90 | DXGI_MODE_ROTATION_ROTATE270 => (height, width),
+            _ => (width, height),
+        };
+
+        let mut data_vec: Vec<u8> = Vec::with_capacity(rotated_width * rotated_height * 4);
+
+        let bytes_per_pixel = 4; // BGRA
+        let source_slice = unsafe { slice::from_raw_parts(source as *const u8, pitch * height) };
+
+        match desc.Rotation {
+            DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED => {
+                for i in 0..height {
+                    let start = i * pitch;
+                    let end = start + width * bytes_per_pixel;
+                    data_vec.extend_from_slice(&source_slice[start..end]);
+                }
+            }
+            DXGI_MODE_ROTATION_ROTATE90 => {
+                for i in 0..width {
+                    for j in (0..height).rev() {
+                        let index = j * pitch + i * bytes_per_pixel;
+                        data_vec.extend_from_slice(&source_slice[index..index + bytes_per_pixel]);
+                    }
+                }
+            }
+            DXGI_MODE_ROTATION_ROTATE180 => {
+                for i in (0..height).rev() {
+                    for j in (0..width).rev() {
+                        let index = i * pitch + j * bytes_per_pixel;
+                        data_vec.extend_from_slice(&source_slice[index..index + bytes_per_pixel]);
+                    }
+                }
+            }
+            DXGI_MODE_ROTATION_ROTATE270 => {
+                for i in (0..width).rev() {
+                    for j in 0..height {
+                        let index = j * pitch + i * bytes_per_pixel;
+                        data_vec.extend_from_slice(&source_slice[index..index + bytes_per_pixel]);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        unsafe { surface.Unmap()? };
+
+        Ok((data_vec, (rotated_width, rotated_height), metadata))
+    }
 }
+
+pub type CaptureFrameWithMetadataResult =
+    Result<(Vec<BGRA8>, (usize, usize), FrameMetadata), CaptureError>;
+
+pub type CaptureFrameComponentsWithMetadataResult =
+    Result<(Vec<u8>, (usize, usize), FrameMetadata), CaptureError>;

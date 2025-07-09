@@ -146,6 +146,80 @@ fn bench_memory_efficiency(c: &mut Criterion) {
     });
 }
 
+fn bench_capture_frame_with_metadata(c: &mut Criterion) {
+    let mut manager = match DXGIManager::new(1000) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    c.bench_function("capture_frame_with_metadata", |b| {
+        b.iter(|| {
+            let result = manager.capture_frame_with_metadata();
+            black_box(result)
+        })
+    });
+}
+
+fn bench_capture_frame_components_with_metadata(c: &mut Criterion) {
+    let mut manager = match DXGIManager::new(1000) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    c.bench_function("capture_frame_components_with_metadata", |b| {
+        b.iter(|| {
+            let result = manager.capture_frame_components_with_metadata();
+            black_box(result)
+        })
+    });
+}
+
+fn bench_metadata_processing(c: &mut Criterion) {
+    let mut manager = match DXGIManager::new(1000) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    c.bench_function("metadata_processing", |b| {
+        b.iter(|| {
+            let result = manager.capture_frame_with_metadata();
+            if let Ok((_, _, metadata)) = &result {
+                // Simulate processing metadata
+                let has_updates = metadata.has_updates();
+                let has_mouse = metadata.has_mouse_updates();
+                let change_count = metadata.total_change_count();
+                black_box((has_updates, has_mouse, change_count));
+            }
+            black_box(result)
+        })
+    });
+}
+
+fn bench_metadata_vs_regular_capture(c: &mut Criterion) {
+    let mut manager = match DXGIManager::new(1000) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    let mut group = c.benchmark_group("metadata_vs_regular");
+
+    group.bench_function("regular_capture", |b| {
+        b.iter(|| {
+            let result = manager.capture_frame();
+            black_box(result)
+        })
+    });
+
+    group.bench_function("metadata_capture", |b| {
+        b.iter(|| {
+            let result = manager.capture_frame_with_metadata();
+            black_box(result)
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_capture_frame,
@@ -157,7 +231,11 @@ criterion_group!(
     bench_capture_source_operations,
     bench_capture_source_setting,
     bench_capture_performance_regression,
-    bench_memory_efficiency
+    bench_memory_efficiency,
+    bench_capture_frame_with_metadata,
+    bench_capture_frame_components_with_metadata,
+    bench_metadata_processing,
+    bench_metadata_vs_regular_capture
 );
 
 criterion_main!(benches);

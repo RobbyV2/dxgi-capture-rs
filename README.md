@@ -15,6 +15,7 @@ This library provides a high-performance Rust interface to the Windows DXGI Desk
 - **High Performance**: Direct access to DXGI Desktop Duplication API
 - **Multiple Monitor Support**: Capture from any available display
 - **Flexible Output**: Get pixel data as BGRA8 or raw component bytes
+- **Frame Metadata**: Access dirty rectangles, moved rectangles, and timing information
 - **Error Handling**: Comprehensive error types for robust applications
 - **Windows Only**: Optimized specifically for Windows platforms
 
@@ -52,6 +53,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Frame Metadata for Streaming Applications
+
+The library provides detailed frame metadata including dirty rectangles and moved rectangles, which is crucial for optimizing streaming and remote desktop applications. This allows you to only process and transmit the parts of the screen that have actually changed.
+
+```rust
+use dxgi_capture_rs::{DXGIManager, CaptureError};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut manager = DXGIManager::new(1000)?;
+
+    match manager.capture_frame_with_metadata() {
+        Ok((pixels, (width, height), metadata)) => {
+            // Only process frame if there are actual changes
+            if metadata.has_updates() {
+                println!("Frame has {} dirty rects and {} move rects",
+                         metadata.dirty_rects.len(), metadata.move_rects.len());
+                
+                // Process moved rectangles first (as per Microsoft recommendation)
+                for move_rect in &metadata.move_rects {
+                    let (src_x, src_y) = move_rect.source_point;
+                    let (dst_left, dst_top, dst_right, dst_bottom) = move_rect.destination_rect;
+                    
+                    // Copy pixels from source to destination
+                    // This is much more efficient than re-encoding the entire area
+                    println!("Content moved from ({}, {}) to ({}, {}, {}, {})",
+                             src_x, src_y, dst_left, dst_top, dst_right, dst_bottom);
+                }
+                
+                // Then process dirty rectangles
+                for &(left, top, right, bottom) in &metadata.dirty_rects {
+                    let width = (right - left) as usize;
+                    let height = (bottom - top) as usize;
+                    
+                    // Only encode/transmit the changed region
+                    println!("Dirty region: ({}, {}) to ({}, {}) [{}x{}]",
+                             left, top, right, bottom, width, height);
+                }
+            }
+            
+            // Check for mouse cursor updates
+            if metadata.has_mouse_updates() {
+                if let Some((x, y)) = metadata.pointer_position {
+                    println!("Mouse cursor at ({}, {}), visible: {}", x, y, metadata.pointer_visible);
+                }
+            }
+            
+            // Access timing information
+            if metadata.accumulated_frames > 1 {
+                println!("This frame accumulated {} updates", metadata.accumulated_frames);
+            }
+        }
+        Err(CaptureError::Timeout) => {
+            println!("No new frame available");
+        }
+        Err(e) => {
+            eprintln!("Capture failed: {:?}", e);
+        }
+    }
+    
+    Ok(())
+}
+```
+
+### Benefits of Using Metadata
+
+- **Bandwidth Optimization**: Only transmit changed regions for streaming applications
+- **CPU Efficiency**: Avoid processing unchanged screen areas
+- **Better User Experience**: Handle moved content more efficiently than dirty regions
+- **Mouse Tracking**: Separate mouse cursor updates from screen content changes
+- **Frame Timing**: Access Windows performance counters for precise timing
+
 ## API Reference
 
 ### DXGIManager
@@ -64,6 +136,8 @@ The main interface for screen capture operations.
 - `geometry() -> (usize, usize)` - Get screen dimensions
 - `capture_frame() -> Result<(Vec<BGRA8>, (usize, usize)), CaptureError>` - Capture a frame
 - `capture_frame_components() -> Result<(Vec<u8>, (usize, usize)), CaptureError>` - Capture raw components
+- `capture_frame_with_metadata() -> Result<(Vec<BGRA8>, (usize, usize), FrameMetadata), CaptureError>` - Capture with metadata
+- `capture_frame_components_with_metadata() -> Result<(Vec<u8>, (usize, usize), FrameMetadata), CaptureError>` - Capture raw components with metadata
 - `set_capture_source_index(index: usize)` - Select capture source (monitor)
 - `set_timeout_ms(timeout_ms: u32)` - Update capture timeout
 
@@ -74,6 +148,35 @@ The main interface for screen capture operations.
 - `CaptureError::RefreshFailure` - Could not refresh after failure
 - `CaptureError::Timeout` - AcquireNextFrame timed out
 - `CaptureError::Fail(msg)` - General failure with description
+
+### Metadata Types
+
+#### FrameMetadata
+
+Contains frame information and change detection data:
+
+- `dirty_rects: Vec<(i32, i32, i32, i32)>` - Changed screen regions (left, top, right, bottom)
+- `move_rects: Vec<MoveRect>` - Moved screen regions
+- `pointer_position: Option<(i32, i32)>` - Mouse cursor position if visible
+- `pointer_visible: bool` - Whether mouse cursor is visible
+- `last_present_time: i64` - Windows performance counter timestamp
+- `last_mouse_update_time: i64` - Last mouse update timestamp
+- `accumulated_frames: u32` - Number of frames accumulated since last processed
+- `rects_coalesced: bool` - Whether rectangles were merged by the system
+- `protected_content_masked_out: bool` - Whether protected content was hidden
+
+#### Helper Methods
+
+- `has_updates() -> bool` - Returns true if frame has any changes
+- `has_mouse_updates() -> bool` - Returns true if mouse cursor was updated
+- `total_change_count() -> usize` - Returns total number of changed regions
+
+#### MoveRect
+
+Represents content moved from one location to another:
+
+- `source_point: (i32, i32)` - Source location (x, y)
+- `destination_rect: (i32, i32, i32, i32)` - Destination rectangle (left, top, right, bottom)
 
 ## Multi-Monitor Support
 
@@ -91,6 +194,8 @@ manager.set_capture_source_index(1);
 
 - Use appropriate timeout values based on your frame rate needs
 - Consider using `capture_frame_components()` if you need raw byte data
+- Use metadata methods to optimize streaming by only processing changed regions
+- Process move rectangles before dirty rectangles for correct visual output
 - The library handles screen rotation automatically
 - Memory usage scales with screen resolution
 
