@@ -144,6 +144,7 @@
 //! if you need concurrent capture operations.
 
 #![cfg(windows)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, doc(cfg(windows)))]
 
 use std::fmt;
