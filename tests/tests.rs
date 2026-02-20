@@ -1,6 +1,6 @@
 //! Tests for dxgi-capture-rs library functionality.
 
-use dxgi_capture_rs::{BGRA8, CaptureError, DXGIManager, hr_failed};
+use dxgi_capture_rs::{BGRA8, CaptureError, DXGIManager};
 
 #[test]
 fn test_dxgi_manager_creation() {
@@ -261,16 +261,16 @@ fn test_bgra8_color() {
 }
 
 #[test]
-fn test_hr_failed() {
+fn test_hresult_failure_detection() {
     use windows::Win32::Foundation::{E_FAIL, S_OK};
     use windows::core::HRESULT;
 
-    assert!(!hr_failed(S_OK));
-    assert!(hr_failed(E_FAIL));
-    assert!(!hr_failed(HRESULT(0)));
-    assert!(!hr_failed(HRESULT(1)));
-    assert!(hr_failed(HRESULT(-1)));
-    assert!(hr_failed(HRESULT(-2147467259)));
+    assert!(!S_OK.is_err());
+    assert!(E_FAIL.is_err());
+    assert!(!HRESULT(0).is_err());
+    assert!(!HRESULT(1).is_err());
+    assert!(HRESULT(-1).is_err());
+    assert!(HRESULT(-2147467259).is_err());
 }
 
 #[test]
@@ -291,19 +291,19 @@ fn test_capture_error_variants() {
 }
 
 #[test]
-fn test_hr_failed_comprehensive() {
+fn test_hresult_failure_detection_comprehensive() {
     use windows::Win32::Foundation::{E_FAIL, S_OK};
     use windows::core::HRESULT;
 
-    assert!(!hr_failed(S_OK));
-    assert!(hr_failed(E_FAIL));
+    assert!(!S_OK.is_err());
+    assert!(E_FAIL.is_err());
 
-    assert!(!hr_failed(HRESULT(0)));
-    assert!(!hr_failed(HRESULT(1)));
+    assert!(!HRESULT(0).is_err());
+    assert!(!HRESULT(1).is_err());
 
-    assert!(hr_failed(HRESULT(-1)));
-    assert!(hr_failed(HRESULT(0x8000_4005u32 as i32)));
-    assert!(hr_failed(HRESULT(0x8007_000Eu32 as i32)));
+    assert!(HRESULT(-1).is_err());
+    assert!(HRESULT(0x8000_4005u32 as i32).is_err());
+    assert!(HRESULT(0x8007_000Eu32 as i32).is_err());
 }
 
 #[test]
@@ -760,6 +760,28 @@ fn test_resource_management() {
     assert!(
         final_manager.is_ok(),
         "Should be able to create a manager after others were dropped"
+    );
+}
+
+#[test]
+fn test_dxgi_manager_release() {
+    // Regression test for GitHub issue: COM resources must be released on drop,
+    // allowing a new DXGIManager to be created afterwards.
+    {
+        let dxgi = DXGIManager::new(1000);
+        if dxgi.is_ok() {
+            println!("DXGI was created");
+        } else {
+            println!("DXGI not available - skipping release test");
+            return;
+        }
+        // `dxgi` is dropped here at end of scope, releasing COM resources.
+    }
+
+    let dxgi2 = DXGIManager::new(1000);
+    assert!(
+        dxgi2.is_ok(),
+        "Should be able to create a new DXGIManager after the previous one was dropped"
     );
 }
 

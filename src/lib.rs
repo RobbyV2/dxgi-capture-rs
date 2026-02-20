@@ -165,10 +165,10 @@ use windows::{
                     DXGI_MODE_ROTATION_UNSPECIFIED,
                 },
                 CreateDXGIFactory1, DXGI_ERROR_ACCESS_DENIED, DXGI_ERROR_ACCESS_LOST,
-                DXGI_ERROR_MORE_DATA, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ,
-                DXGI_MAPPED_RECT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT,
-                DXGI_OUTPUT_DESC, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput,
-                IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, IDXGISurface1,
+                DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ, DXGI_MAPPED_RECT,
+                DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT, DXGI_OUTPUT_DESC, IDXGIAdapter,
+                IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication,
+                IDXGIResource, IDXGISurface1,
             },
         },
     },
@@ -350,17 +350,10 @@ impl From<windows::core::Error> for OutputDuplicationError {
 
 /// Checks whether a Windows HRESULT represents a failure condition.
 ///
-/// This utility function determines if a Windows HRESULT value indicates
-/// a failure. In the Windows API, HRESULT values are 32-bit integers where
-/// negative values indicate failures and non-negative values indicate success.
+/// # Deprecation
 ///
-/// # Arguments
-///
-/// * `hr` - The HRESULT value to check
-///
-/// # Returns
-///
-/// `true` if the HRESULT represents a failure (negative value), `false` otherwise.
+/// This function is a trivial wrapper around [`windows::core::HRESULT::is_err`].
+/// Use `hr.is_err()` directly instead.
 ///
 /// # Examples
 ///
@@ -370,29 +363,21 @@ impl From<windows::core::Error> for OutputDuplicationError {
 /// use windows::Win32::Foundation::{S_OK, E_FAIL};
 ///
 /// // Success codes
-/// assert!(!hr_failed(S_OK));        // 0
-/// assert!(!hr_failed(HRESULT(1)));  // Positive values are success
+/// assert!(!hr_failed(S_OK));
+/// assert!(!hr_failed(HRESULT(1)));
 ///
 /// // Failure codes
-/// assert!(hr_failed(E_FAIL));       // -2147467259
-/// assert!(hr_failed(HRESULT(-1)));  // Any negative value
+/// assert!(hr_failed(E_FAIL));
+/// assert!(hr_failed(HRESULT(-1)));
 /// ```
-///
-/// # Technical Details
-///
-/// The function simply checks if the HRESULT is negative (< 0). This works
-/// because HRESULT uses the most significant bit as a severity flag:
-/// - 0 = Success
-/// - 1 = Failure
-///
-/// This is a standard Windows API pattern used throughout the DXGI and D3D11 APIs.
-///
-/// # Safety
-///
-/// This function is unsafe because it involves a raw pointer dereference.
+#[deprecated(since = "1.2.0", note = "Use `HRESULT::is_err()` directly instead")]
 pub fn hr_failed(hr: windows::core::HRESULT) -> bool {
     hr.is_err()
 }
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
 
 fn create_dxgi_factory_1() -> WindowsResult<IDXGIFactory1> {
     unsafe { CreateDXGIFactory1() }
@@ -422,49 +407,48 @@ fn d3d11_create_device(
     Ok((device.unwrap(), device_context.unwrap()))
 }
 
-fn get_adapter_outputs(adapter: &IDXGIAdapter1) -> WindowsResult<Vec<IDXGIOutput>> {
-    let mut outputs = Vec::new();
+/// Enumerates the desktop-attached outputs for a given adapter and returns
+/// only the one at the requested index (if it exists).
+fn get_output_at_index(
+    adapter: &IDXGIAdapter1,
+    index: usize,
+) -> WindowsResult<Option<IDXGIOutput>> {
+    let mut current = 0usize;
     for i in 0.. {
         match unsafe { adapter.EnumOutputs(i) } {
             Ok(output) => {
                 let desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc()? };
                 if desc.AttachedToDesktop.as_bool() {
-                    outputs.push(output);
+                    if current == index {
+                        return Ok(Some(output));
+                    }
+                    current += 1;
                 }
             }
             Err(_) => break,
         }
     }
-    Ok(outputs)
+    Ok(None)
 }
 
-fn get_capture_source(
-    output_dups: &DuplicatedOutputs,
-    cs_index: usize,
-) -> Option<(IDXGIOutputDuplication, IDXGIOutput1)> {
-    if cs_index < output_dups.len() {
-        Some(output_dups[cs_index].clone())
+/// Maps a Windows error from a capture operation into the appropriate
+/// [`CaptureError`] variant.
+fn map_capture_error(e: windows::core::Error) -> CaptureError {
+    let code = e.code();
+    if code == DXGI_ERROR_ACCESS_LOST {
+        CaptureError::AccessLost
+    } else if code == DXGI_ERROR_WAIT_TIMEOUT {
+        CaptureError::Timeout
+    } else if code == DXGI_ERROR_ACCESS_DENIED {
+        CaptureError::AccessDenied
     } else {
-        None
+        CaptureError::Fail(e)
     }
 }
 
-type DuplicatedOutputs = Vec<(IDXGIOutputDuplication, IDXGIOutput1)>;
-
-fn duplicate_outputs(
-    device: &ID3D11Device,
-    outputs: Vec<IDXGIOutput>,
-) -> WindowsResult<DuplicatedOutputs> {
-    let mut duplicated_outputs = Vec::new();
-
-    for output in outputs {
-        let output1: IDXGIOutput1 = output.cast()?;
-        let duplicated_output = unsafe { output1.DuplicateOutput(device)? };
-        duplicated_outputs.push((duplicated_output, output1));
-    }
-
-    Ok(duplicated_outputs)
-}
+// ---------------------------------------------------------------------------
+// DuplicatedOutput — internal handle to a single duplicated output
+// ---------------------------------------------------------------------------
 
 struct DuplicatedOutput {
     device: ID3D11Device,
@@ -478,42 +462,13 @@ impl DuplicatedOutput {
         unsafe { self.output.GetDesc() }
     }
 
-    fn capture_frame_to_surface(&mut self, timeout_ms: u32) -> WindowsResult<IDXGISurface1> {
-        let mut resource: Option<IDXGIResource> = None;
-        let mut frame_info = unsafe { mem::zeroed() };
-
-        unsafe {
-            self.output_duplication
-                .AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource)?
-        };
-
-        let texture: ID3D11Texture2D = resource.unwrap().cast()?;
-        let mut desc = D3D11_TEXTURE2D_DESC::default();
-        unsafe { texture.GetDesc(&mut desc) };
-        desc.Usage = D3D11_USAGE_STAGING;
-        desc.BindFlags = 0;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
-        desc.MiscFlags = 0;
-
-        let mut staged_texture: Option<ID3D11Texture2D> = None;
-        unsafe {
-            self.device
-                .CreateTexture2D(&desc, None, Some(&mut staged_texture))?
-        };
-        let staged_texture = staged_texture.unwrap();
-
-        unsafe { self.device_context.CopyResource(&staged_texture, &texture) };
-
-        unsafe { self.output_duplication.ReleaseFrame()? };
-
-        let surface: IDXGISurface1 = staged_texture.cast()?;
-        Ok(surface)
-    }
-
-    fn capture_frame_to_surface_with_metadata(
+    /// Acquires a frame, optionally extracts metadata, copies it to a staging
+    /// texture, releases the DXGI frame, and returns the mapped surface.
+    fn capture_frame_to_surface(
         &mut self,
         timeout_ms: u32,
-    ) -> WindowsResult<(IDXGISurface1, FrameMetadata)> {
+        with_metadata: bool,
+    ) -> WindowsResult<(IDXGISurface1, Option<FrameMetadata>)> {
         let mut resource: Option<IDXGIResource> = None;
         let mut frame_info: DXGI_OUTDUPL_FRAME_INFO = unsafe { mem::zeroed() };
 
@@ -522,8 +477,11 @@ impl DuplicatedOutput {
                 .AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource)?
         };
 
-        // Extract metadata from frame_info
-        let metadata = self.extract_frame_metadata(&frame_info)?;
+        let metadata = if with_metadata {
+            Some(self.extract_frame_metadata(&frame_info)?)
+        } else {
+            None
+        };
 
         let texture: ID3D11Texture2D = resource.unwrap().cast()?;
         let mut desc = D3D11_TEXTURE2D_DESC::default();
@@ -555,7 +513,6 @@ impl DuplicatedOutput {
         let mut dirty_rects = Vec::new();
         let mut move_rects = Vec::new();
 
-        // Get dirty rectangles if there are any
         if frame_info.TotalMetadataBufferSize > 0 {
             // Get dirty rectangles
             let mut dirty_rects_buffer_size = 0u32;
@@ -567,7 +524,6 @@ impl DuplicatedOutput {
                 )
             };
 
-            // Handle the case where there are dirty rects
             if dirty_result.is_ok() && dirty_rects_buffer_size > 0 {
                 let dirty_rect_count = dirty_rects_buffer_size / mem::size_of::<RECT>() as u32;
                 let mut dirty_rects_buffer: Vec<RECT> =
@@ -597,7 +553,6 @@ impl DuplicatedOutput {
                 )
             };
 
-            // Handle the case where there are move rects
             if move_result.is_ok() && move_rects_buffer_size > 0 {
                 let move_rect_count =
                     move_rects_buffer_size / mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>() as u32;
@@ -650,6 +605,10 @@ impl DuplicatedOutput {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DXGIManager — public API
+// ---------------------------------------------------------------------------
+
 /// The main manager for handling DXGI desktop duplication.
 ///
 /// `DXGIManager` provides a high-level interface to the Windows DXGI Desktop
@@ -692,11 +651,11 @@ impl DuplicatedOutput {
 ///
 /// let mut manager = DXGIManager::new(1000)?;
 ///
-/// // Capture from primary monitor
+/// // Capture from primary display (default)
 /// manager.set_capture_source_index(0);
 /// let primary_frame = manager.capture_frame();
 ///
-/// // Capture from secondary monitor (if available)
+/// // Capture from secondary display (if available)
 /// manager.set_capture_source_index(1);
 /// let secondary_frame = manager.capture_frame();
 /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -775,18 +734,8 @@ impl DXGIManager {
     /// let manager = DXGIManager::new(1000)?;
     /// let (width, height) = manager.geometry();
     /// println!("Display resolution: {}x{}", width, height);
-    ///
-    /// // Calculate total pixels
-    /// let total_pixels = width * height;
-    /// println!("Total pixels: {}", total_pixels);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    ///
-    /// # Notes
-    ///
-    /// - The dimensions remain constant unless the display configuration changes
-    /// - If the display configuration changes, you may need to create a new manager
-    /// - This method is fast and can be called frequently without performance concerns
     pub fn geometry(&self) -> (usize, usize) {
         if let Some(ref output) = self.duplicated_output {
             let output_desc = output.get_desc().expect("Failed to get output description");
@@ -798,8 +747,6 @@ impl DXGIManager {
             } = output_desc.DesktopCoordinates;
             ((right - left) as usize, (bottom - top) as usize)
         } else {
-            // This should not happen if the manager was properly initialized
-            // Return (0, 0) to prevent panic, but this indicates a serious issue
             (0, 0)
         }
     }
@@ -844,14 +791,9 @@ impl DXGIManager {
         let previous_index = self.capture_source_index;
         self.capture_source_index = cs;
 
-        // Try to acquire the new capture source
-        if self.acquire_output_duplication().is_err() {
-            // If it fails and we're switching to index 0 (primary), revert to previous index
-            // This helps recover from invalid secondary display switches
-            if cs == 0 && cs != previous_index {
-                self.capture_source_index = previous_index;
-                let _ = self.acquire_output_duplication();
-            }
+        if self.acquire_output_duplication().is_err() && cs == 0 && cs != previous_index {
+            self.capture_source_index = previous_index;
+            let _ = self.acquire_output_duplication();
         }
     }
 
@@ -915,12 +857,6 @@ impl DXGIManager {
     /// manager.set_timeout_ms(5000);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    ///
-    /// # Performance Notes
-    ///
-    /// - Lower timeouts reduce latency but may increase CPU usage due to frequent polling
-    /// - Higher timeouts reduce CPU usage but may increase latency
-    /// - Timeout of 0 is useful for checking if a frame is immediately available
     pub fn set_timeout_ms(&mut self, timeout_ms: u32) {
         self.timeout_ms = timeout_ms
     }
@@ -985,13 +921,9 @@ impl DXGIManager {
     /// }
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    ///
-    /// # Notes
-    ///
-    /// - This method is automatically called during manager creation
-    /// - It's automatically called when switching capture sources
-    /// - You typically don't need to call this manually unless recovering from errors
     pub fn acquire_output_duplication(&mut self) -> Result<(), OutputDuplicationError> {
+        // Drop any existing output duplication first, releasing the COM
+        // resources before attempting to acquire new ones.
         self.duplicated_output = None;
 
         for i in 0.. {
@@ -1006,93 +938,67 @@ impl DXGIManager {
                 Err(_) => continue,
             };
 
-            let outputs = get_adapter_outputs(&adapter)?;
-            if outputs.is_empty() {
-                continue;
-            }
+            // Only look up and duplicate the single output we actually need.
+            let output = match get_output_at_index(&adapter, self.capture_source_index)? {
+                Some(output) => output,
+                None => continue,
+            };
 
-            let output_duplications = duplicate_outputs(&d3d11_device, outputs)?;
+            let output1: IDXGIOutput1 = output.cast()?;
+            let output_duplication = match unsafe { output1.DuplicateOutput(&d3d11_device) } {
+                Ok(dup) => dup,
+                Err(_) => continue,
+            };
 
-            if let Some((output_duplication, output)) =
-                get_capture_source(&output_duplications, self.capture_source_index)
-            {
-                self.duplicated_output = Some(DuplicatedOutput {
-                    device: d3d11_device,
-                    device_context,
-                    output,
-                    output_duplication,
-                });
-                return Ok(());
-            }
+            self.duplicated_output = Some(DuplicatedOutput {
+                device: d3d11_device,
+                device_context,
+                output: output1,
+                output_duplication,
+            });
+            return Ok(());
         }
         Err(OutputDuplicationError::NoOutput)
     }
 
-    fn capture_frame_to_surface(&mut self) -> Result<IDXGISurface1, CaptureError> {
+    // -----------------------------------------------------------------------
+    // Internal capture helpers
+    // -----------------------------------------------------------------------
+
+    /// Acquires a frame surface, optionally with metadata.  On recoverable
+    /// DXGI errors the internal `duplicated_output` is reset so the next
+    /// capture attempt will re-acquire.
+    fn acquire_surface(
+        &mut self,
+        with_metadata: bool,
+    ) -> Result<(IDXGISurface1, Option<FrameMetadata>), CaptureError> {
         if self.duplicated_output.is_none() && self.acquire_output_duplication().is_err() {
             return Err(CaptureError::RefreshFailure);
         }
 
-        let duplicated_output = self.duplicated_output.as_mut().unwrap();
+        let timeout_ms = self.timeout_ms;
+        let dup = self.duplicated_output.as_mut().unwrap();
 
-        match duplicated_output.capture_frame_to_surface(self.timeout_ms) {
-            Ok(surface) => Ok(surface),
+        match dup.capture_frame_to_surface(timeout_ms, with_metadata) {
+            Ok(result) => Ok(result),
             Err(e) => {
-                let code = e.code();
-                if code == DXGI_ERROR_ACCESS_LOST {
+                let err = map_capture_error(e);
+                // On non-timeout errors, drop the output so it is re-acquired.
+                if !matches!(err, CaptureError::Timeout) {
                     self.duplicated_output = None;
-                    Err(CaptureError::AccessLost)
-                } else if code == DXGI_ERROR_WAIT_TIMEOUT {
-                    Err(CaptureError::Timeout)
-                } else if code == DXGI_ERROR_ACCESS_DENIED {
-                    self.duplicated_output = None;
-                    Err(CaptureError::AccessDenied)
-                } else {
-                    self.duplicated_output = None;
-                    Err(CaptureError::Fail(e))
                 }
+                Err(err)
             }
         }
     }
 
-    fn capture_frame_to_surface_with_metadata(
-        &mut self,
-    ) -> Result<(IDXGISurface1, FrameMetadata), CaptureError> {
-        if self.duplicated_output.is_none() && self.acquire_output_duplication().is_err() {
-            return Err(CaptureError::RefreshFailure);
-        }
-
-        let duplicated_output = self.duplicated_output.as_mut().unwrap();
-
-        match duplicated_output.capture_frame_to_surface_with_metadata(self.timeout_ms) {
-            Ok((surface, metadata)) => Ok((surface, metadata)),
-            Err(e) => {
-                let code = e.code();
-                if code == DXGI_ERROR_ACCESS_LOST {
-                    self.duplicated_output = None;
-                    Err(CaptureError::AccessLost)
-                } else if code == DXGI_ERROR_WAIT_TIMEOUT {
-                    Err(CaptureError::Timeout)
-                } else if code == DXGI_ERROR_ACCESS_DENIED {
-                    self.duplicated_output = None;
-                    Err(CaptureError::AccessDenied)
-                } else if code == DXGI_ERROR_MORE_DATA {
-                    // This should not happen with proper buffer sizing, but handle it gracefully
-                    self.duplicated_output = None;
-                    Err(CaptureError::Fail(e))
-                } else {
-                    self.duplicated_output = None;
-                    Err(CaptureError::Fail(e))
-                }
-            }
-        }
-    }
-
-    fn capture_frame_t<T: Copy + Send + Sync + Sized>(
-        &mut self,
+    /// Reads pixel data from a mapped surface, handling rotation. This is the
+    /// single source of truth for the rotation-aware copy logic. `T` is either
+    /// [`BGRA8`] or `u8`.
+    fn copy_surface_data<T: Copy + Send + Sync + Sized>(
+        &self,
+        surface: &IDXGISurface1,
     ) -> Result<(Vec<T>, (usize, usize)), CaptureError> {
-        let surface = self.capture_frame_to_surface()?;
-
         let mut rect = DXGI_MAPPED_RECT::default();
         unsafe { surface.Map(&mut rect, DXGI_MAP_READ)? };
 
@@ -1112,14 +1018,13 @@ impl DXGIManager {
             _ => (width, height),
         };
 
-        let mut data_vec: Vec<T> = Vec::with_capacity(
-            rotated_width * rotated_height * mem::size_of::<BGRA8>() / mem::size_of::<T>(),
-        );
-
         let bytes_per_pixel = mem::size_of::<BGRA8>() / mem::size_of::<T>();
         let source_slice = unsafe {
             slice::from_raw_parts(source as *const T, pitch * height / mem::size_of::<T>())
         };
+
+        let mut data_vec: Vec<T> =
+            Vec::with_capacity(rotated_width * rotated_height * bytes_per_pixel);
 
         match desc.Rotation {
             DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED => {
@@ -1161,6 +1066,10 @@ impl DXGIManager {
         Ok((data_vec, (rotated_width, rotated_height)))
     }
 
+    // -----------------------------------------------------------------------
+    // Public capture methods
+    // -----------------------------------------------------------------------
+
     /// Captures a single frame and returns it as a `Vec<BGRA8>`.
     ///
     /// This method captures the current screen content and returns it as a vector
@@ -1184,7 +1093,6 @@ impl DXGIManager {
     /// match manager.capture_frame() {
     ///     Ok((pixels, (width, height))) => {
     ///         println!("Captured {}x{} frame with {} pixels", width, height, pixels.len());
-    ///         // Process pixels - each pixel has b, g, r, a components
     ///     }
     ///     Err(CaptureError::Timeout) => {
     ///         // No new frame available within timeout
@@ -1193,14 +1101,9 @@ impl DXGIManager {
     /// }
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    ///
-    /// # Performance Notes
-    ///
-    /// - Automatically handles screen rotation
-    /// - Memory usage is `width * height * 4` bytes
-    /// - Consider using [`DXGIManager::capture_frame_components`] for raw byte access
     pub fn capture_frame(&mut self) -> Result<(Vec<BGRA8>, (usize, usize)), CaptureError> {
-        self.capture_frame_t()
+        let (surface, _) = self.acquire_surface(false)?;
+        self.copy_surface_data(&surface)
     }
 
     /// Captures a single frame and returns it as a `Vec<u8>`.
@@ -1226,20 +1129,14 @@ impl DXGIManager {
     /// match manager.capture_frame_components() {
     ///     Ok((components, (width, height))) => {
     ///         println!("Captured {}x{} frame with {} bytes", width, height, components.len());
-    ///         // Process raw components (4 bytes per pixel: B, G, R, A)
     ///     }
     ///     Err(e) => eprintln!("Capture failed: {:?}", e),
     /// }
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    ///
-    /// # Performance Notes
-    ///
-    /// - Provides direct access to pixel data
-    /// - Memory usage is `width * height * 4` bytes
-    /// - Useful for interfacing with C libraries or custom pixel processing
     pub fn capture_frame_components(&mut self) -> Result<(Vec<u8>, (usize, usize)), CaptureError> {
-        self.capture_frame_t()
+        let (surface, _) = self.acquire_surface(false)?;
+        self.copy_surface_data(&surface)
     }
 
     /// Captures a single frame with minimal overhead for performance-critical applications.
@@ -1264,14 +1161,13 @@ impl DXGIManager {
     /// match manager.capture_frame_fast() {
     ///     Ok((pixels, (width, height))) => {
     ///         println!("Fast captured {}x{} frame", width, height);
-    ///         // Process raw BGRA data directly
     ///     }
     ///     Err(e) => eprintln!("Fast capture failed: {:?}", e),
     /// }
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn capture_frame_fast(&mut self) -> Result<(Vec<u8>, (usize, usize)), CaptureError> {
-        let surface = self.capture_frame_to_surface()?;
+        let (surface, _) = self.acquire_surface(false)?;
 
         let mut rect = DXGI_MAPPED_RECT::default();
         unsafe { surface.Map(&mut rect, DXGI_MAP_READ)? };
@@ -1287,20 +1183,16 @@ impl DXGIManager {
         let pitch = rect.Pitch as usize;
         let source = rect.pBits;
 
-        // Fast path: copy data without rotation handling for maximum performance
-        let bytes_per_row = width * 4; // 4 bytes per pixel (BGRA)
+        let bytes_per_row = width * 4;
         let mut data_vec = Vec::with_capacity(width * height * 4);
 
         unsafe {
-            // Ultra-fast path: if pitch equals row width, copy everything at once
             if pitch == bytes_per_row {
                 let total_bytes = width * height * 4;
                 let source_slice = slice::from_raw_parts(source as *const u8, total_bytes);
                 data_vec.extend_from_slice(source_slice);
             } else {
-                // Standard path: copy row by row for different pitch
                 let source_slice = slice::from_raw_parts(source as *const u8, pitch * height);
-
                 for row in 0..height {
                     let row_start = row * pitch;
                     let row_end = row_start + bytes_per_row;
@@ -1338,19 +1230,6 @@ impl DXGIManager {
     ///     Ok((pixels, (width, height), metadata)) => {
     ///         println!("Captured {}x{} frame with {} dirty rects and {} move rects",
     ///                  width, height, metadata.dirty_rects.len(), metadata.move_rects.len());
-    ///         
-    ///         // Process only dirty regions for efficient streaming
-    ///         for (left, top, right, bottom) in &metadata.dirty_rects {
-    ///             println!("Dirty region: ({}, {}) to ({}, {})", left, top, right, bottom);
-    ///         }
-    ///         
-    ///         // Handle moved content
-    ///         for move_rect in &metadata.move_rects {
-    ///             println!("Content moved from ({}, {}) to ({}, {}, {}, {})",
-    ///                      move_rect.source_point.0, move_rect.source_point.1,
-    ///                      move_rect.destination_rect.0, move_rect.destination_rect.1,
-    ///                      move_rect.destination_rect.2, move_rect.destination_rect.3);
-    ///         }
     ///     }
     ///     Err(CaptureError::Timeout) => {
     ///         // No new frame available within timeout
@@ -1359,80 +1238,10 @@ impl DXGIManager {
     /// }
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    ///
-    /// # Performance Notes
-    ///
-    /// - Automatically handles screen rotation
-    /// - Memory usage is `width * height * 4` bytes plus metadata
-    /// - Use dirty and move rectangles to optimize streaming applications
-    /// - Move rectangles should be processed before dirty rectangles for correct visuals
     pub fn capture_frame_with_metadata(&mut self) -> CaptureFrameWithMetadataResult {
-        let (surface, metadata) = self.capture_frame_to_surface_with_metadata()?;
-
-        let mut rect = DXGI_MAPPED_RECT::default();
-        unsafe { surface.Map(&mut rect, DXGI_MAP_READ)? };
-
-        let desc = self
-            .duplicated_output
-            .as_ref()
-            .ok_or(CaptureError::RefreshFailure)?
-            .get_desc()?;
-        let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left) as usize;
-        let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top) as usize;
-
-        let pitch = rect.Pitch as usize;
-        let source = rect.pBits;
-
-        let (rotated_width, rotated_height) = match desc.Rotation {
-            DXGI_MODE_ROTATION_ROTATE90 | DXGI_MODE_ROTATION_ROTATE270 => (height, width),
-            _ => (width, height),
-        };
-
-        let mut data_vec: Vec<BGRA8> = Vec::with_capacity(rotated_width * rotated_height);
-
-        let bytes_per_pixel = mem::size_of::<BGRA8>();
-        let source_slice = unsafe {
-            slice::from_raw_parts(source as *const BGRA8, pitch * height / bytes_per_pixel)
-        };
-
-        match desc.Rotation {
-            DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED => {
-                for i in 0..height {
-                    let start = i * pitch / bytes_per_pixel;
-                    let end = start + width;
-                    data_vec.extend_from_slice(&source_slice[start..end]);
-                }
-            }
-            DXGI_MODE_ROTATION_ROTATE90 => {
-                for i in 0..width {
-                    for j in (0..height).rev() {
-                        let index = j * pitch / bytes_per_pixel + i;
-                        data_vec.push(source_slice[index]);
-                    }
-                }
-            }
-            DXGI_MODE_ROTATION_ROTATE180 => {
-                for i in (0..height).rev() {
-                    for j in (0..width).rev() {
-                        let index = i * pitch / bytes_per_pixel + j;
-                        data_vec.push(source_slice[index]);
-                    }
-                }
-            }
-            DXGI_MODE_ROTATION_ROTATE270 => {
-                for i in (0..width).rev() {
-                    for j in 0..height {
-                        let index = j * pitch / bytes_per_pixel + i;
-                        data_vec.push(source_slice[index]);
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        unsafe { surface.Unmap()? };
-
-        Ok((data_vec, (rotated_width, rotated_height), metadata))
+        let (surface, metadata) = self.acquire_surface(true)?;
+        let (data, dims) = self.copy_surface_data::<BGRA8>(&surface)?;
+        Ok((data, dims, metadata.unwrap()))
     }
 
     /// Captures a single frame and returns it as `Vec<u8>` along with frame metadata.
@@ -1458,11 +1267,8 @@ impl DXGIManager {
     /// match manager.capture_frame_components_with_metadata() {
     ///     Ok((components, (width, height), metadata)) => {
     ///         println!("Captured {}x{} frame with {} bytes", width, height, components.len());
-    ///         
-    ///         // Only process changed regions for efficiency
     ///         if metadata.has_updates() {
     ///             println!("Frame has {} total changes", metadata.total_change_count());
-    ///             // Process components (4 bytes per pixel: B, G, R, A)
     ///         }
     ///     }
     ///     Err(e) => eprintln!("Capture failed: {:?}", e),
@@ -1472,70 +1278,9 @@ impl DXGIManager {
     pub fn capture_frame_components_with_metadata(
         &mut self,
     ) -> CaptureFrameComponentsWithMetadataResult {
-        let (surface, metadata) = self.capture_frame_to_surface_with_metadata()?;
-
-        let mut rect = DXGI_MAPPED_RECT::default();
-        unsafe { surface.Map(&mut rect, DXGI_MAP_READ)? };
-
-        let desc = self
-            .duplicated_output
-            .as_ref()
-            .ok_or(CaptureError::RefreshFailure)?
-            .get_desc()?;
-        let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left) as usize;
-        let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top) as usize;
-
-        let pitch = rect.Pitch as usize;
-        let source = rect.pBits;
-
-        let (rotated_width, rotated_height) = match desc.Rotation {
-            DXGI_MODE_ROTATION_ROTATE90 | DXGI_MODE_ROTATION_ROTATE270 => (height, width),
-            _ => (width, height),
-        };
-
-        let mut data_vec: Vec<u8> = Vec::with_capacity(rotated_width * rotated_height * 4);
-
-        let bytes_per_pixel = 4; // BGRA
-        let source_slice = unsafe { slice::from_raw_parts(source as *const u8, pitch * height) };
-
-        match desc.Rotation {
-            DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED => {
-                for i in 0..height {
-                    let start = i * pitch;
-                    let end = start + width * bytes_per_pixel;
-                    data_vec.extend_from_slice(&source_slice[start..end]);
-                }
-            }
-            DXGI_MODE_ROTATION_ROTATE90 => {
-                for i in 0..width {
-                    for j in (0..height).rev() {
-                        let index = j * pitch + i * bytes_per_pixel;
-                        data_vec.extend_from_slice(&source_slice[index..index + bytes_per_pixel]);
-                    }
-                }
-            }
-            DXGI_MODE_ROTATION_ROTATE180 => {
-                for i in (0..height).rev() {
-                    for j in (0..width).rev() {
-                        let index = i * pitch + j * bytes_per_pixel;
-                        data_vec.extend_from_slice(&source_slice[index..index + bytes_per_pixel]);
-                    }
-                }
-            }
-            DXGI_MODE_ROTATION_ROTATE270 => {
-                for i in (0..width).rev() {
-                    for j in 0..height {
-                        let index = j * pitch + i * bytes_per_pixel;
-                        data_vec.extend_from_slice(&source_slice[index..index + bytes_per_pixel]);
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        unsafe { surface.Unmap()? };
-
-        Ok((data_vec, (rotated_width, rotated_height), metadata))
+        let (surface, metadata) = self.acquire_surface(true)?;
+        let (data, dims) = self.copy_surface_data::<u8>(&surface)?;
+        Ok((data, dims, metadata.unwrap()))
     }
 }
 
