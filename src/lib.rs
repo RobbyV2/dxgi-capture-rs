@@ -149,6 +149,7 @@
 
 use std::fmt;
 use std::{mem, slice};
+use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL;
 use windows::{
     Win32::{
         Foundation::{HMODULE, RECT},
@@ -384,12 +385,14 @@ fn create_dxgi_factory_1() -> WindowsResult<IDXGIFactory1> {
     unsafe { CreateDXGIFactory1() }
 }
 
+const DEFAULT_D3D11_FEATURES: [D3D_FEATURE_LEVEL; 1] = [D3D_FEATURE_LEVEL_9_1];
+
 fn d3d11_create_device(
     adapter: Option<&IDXGIAdapter>,
+    feature_levels: Option<&[D3D_FEATURE_LEVEL]>,
 ) -> WindowsResult<(ID3D11Device, ID3D11DeviceContext)> {
     let mut device: Option<ID3D11Device> = None;
     let mut device_context: Option<ID3D11DeviceContext> = None;
-    let feature_levels = [D3D_FEATURE_LEVEL_9_1];
 
     unsafe {
         D3D11CreateDevice(
@@ -397,13 +400,13 @@ fn d3d11_create_device(
             D3D_DRIVER_TYPE_UNKNOWN,
             HMODULE::default(),
             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            Some(&feature_levels),
+            feature_levels,
             D3D11_SDK_VERSION,
             Some(&mut device),
             None,
             Some(&mut device_context),
-        )
-    }?;
+        )?;
+    }
 
     Ok((device.unwrap(), device_context.unwrap()))
 }
@@ -934,10 +937,11 @@ impl DXGIManager {
                 Err(e) => return Err(e.into()),
             };
 
-            let (d3d11_device, device_context) = match d3d11_create_device(Some(&adapter.cast()?)) {
-                Ok(device) => device,
-                Err(_) => continue,
-            };
+            let (mut d3d11_device, mut device_context) =
+                match d3d11_create_device(Some(&adapter.cast()?), Some(&DEFAULT_D3D11_FEATURES)) {
+                    Ok(device) => device,
+                    Err(_) => continue,
+                };
 
             // Only look up and duplicate the single output we actually need.
             let output = match get_output_at_index(&adapter, self.capture_source_index)? {
@@ -946,9 +950,26 @@ impl DXGIManager {
             };
 
             let output1: IDXGIOutput1 = output.cast()?;
+
             let output_duplication = match unsafe { output1.DuplicateOutput(&d3d11_device) } {
                 Ok(dup) => dup,
-                Err(_) => continue,
+                Err(_) => {
+                    // Retry creating the device without any features.
+                    match d3d11_create_device(Some(&adapter.cast()?), None) {
+                        Ok((new_device, new_context)) => {
+                            // Retry duplication with the newly created device.
+                            match unsafe { output1.DuplicateOutput(&new_device) } {
+                                Ok(output_dup) => {
+                                    d3d11_device = new_device;
+                                    device_context = new_context;
+                                    output_dup
+                                }
+                                Err(_) => continue,
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
             };
 
             self.duplicated_output = Some(DuplicatedOutput {
